@@ -1,9 +1,16 @@
-%% Copyright 2016, Travelping GmbH <info@travelping.com>
-
-%% This program is free software; you can redistribute it and/or
-%% modify it under the terms of the GNU General Public License
-%% as published by the Free Software Foundation; either version
-%% 2 of the License, or (at your option) any later version.
+%% Copyright 2024, Travelping GmbH <info@travelping.com>
+%%
+%% Licensed under the Apache License, Version 2.0 (the "License");
+%% you may not use this file except in compliance with the License.
+%% You may obtain a copy of the License at
+%%
+%%     http://www.apache.org/licenses/LICENSE-2.0
+%%
+%% Unless required by applicable law or agreed to in writing, software
+%% distributed under the License is distributed on an "AS IS" BASIS,
+%% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+%% See the License for the specific language governing permissions and
+%% limitations under the License.
 
 -module(nats).
 
@@ -12,14 +19,15 @@
 %% API
 -export([connect/2,
          connect/3]).
--export([pub/3,
+-export([pub/2,
+         pub/3,
          pub/4,
          sub/2,
          sub/3,
          unsub/2,
-         unsub/3]).
-%%          disconnect/1,
-%%          is_ready/1]).
+         unsub/3,
+         disconnect/1,
+         is_ready/1]).
 
 %% debug functions
 -export([dump_subs/1]).
@@ -37,6 +45,7 @@
 -define(DEFAULT_OPTS,
         #{verbose => false,
           pedantic => false,
+          headers => true,
           ssl_required => false,
           auth_token => undefined,
           user => undefined,
@@ -46,8 +55,8 @@
           version => ?VERSION,
           buffer_size => 0,
           max_batch_size => ?DEFAULT_MAX_BATCH_SIZE,
-          send_timeout => ?DEFAULT_SEND_TIMEOUT,
-          reconnect => {undefined, 0}}).
+          send_timeout => ?DEFAULT_SEND_TIMEOUT
+         }).
 -define(DEFAULT_SOCKET_OPTS,
         #{reuseaddr => true}).
 
@@ -61,9 +70,10 @@
 %% -type nats_host() :: inet:socket_address() | inet:hostname().
 -type nats_host() :: inet:socket_address().
 
--type opts() :: #{socket         => socket_opts(),
+-type opts() :: #{socket_opts    => socket_opts(),
                   verbose        => boolean(),
                   pedantic       => boolean(),
+                  headers        => boolean(),
                   ssl_required   => boolean(),
                   auth_token     => binary(),
                   user           => binary(),
@@ -73,8 +83,8 @@
                   version        => binary(),
                   buffer_size    => non_neg_integer(),
                   max_batch_size => non_neg_integer(),
-                  send_timeout   => non_neg_integer(),
-                  reconnect      => term()}.
+                  send_timeout   => non_neg_integer()
+                 }.
 
 -type data() :: #{socket         := undefined | gen_tcp:socket() | ssl:socket(),
                   tls            := boolean,
@@ -87,11 +97,13 @@
                   tid            := ets:tid(),
 
                   %% Opts
+                  parent         := pid(),
                   host           := nats_host(),
                   port           := inet:port_number(),
-                  socket         := socket_opts(),
+                  socket_opts    := socket_opts(),
                   verbose        := boolean(),
                   pedantic       := boolean(),
+                  headers        := boolean(),
                   ssl_required   := boolean(),
                   auth_token     := undefined | binary(),
                   user           := undefined | binary(),
@@ -101,17 +113,21 @@
                   version        := binary(),
                   buffer_size    := non_neg_integer(),
                   max_batch_size := non_neg_integer(),
-                  send_timeout   := non_neg_integer(),
-                  reconnect      := term()
+                  send_timeout   := non_neg_integer()
                  }.
 
 -record(pid, {pid}).
 -record(sub, {pid, sid}).
 -record(sub_session, {pid, max_msgs}).
+-record(ready, {pending}).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
+
+start_link(Host, Port, Opts) ->
+    logger:set_primary_config(level, debug),
+    gen_statem:start_link(?MODULE, [Host, Port, maps:merge(#{parent => self()}, Opts)], []).
 
 connect(Host, Port) ->
     connect(Host, Port, #{}).
@@ -122,10 +138,16 @@ connect(Host, Port) ->
           {ok, Pid :: pid()} |
           ignore |
           {error, Error :: term()}.
-connect(Host, Port, Opts) ->
-    logger:set_primary_config(level, debug),
-    gen_statem:start_link(?MODULE, [Host, Port, Opts], []).
 
+connect(Host, Port, Opts) ->
+    start_link(Host, Port, Opts).
+
+pub(Server, Subject) ->
+    pub(Server, Subject, <<>>, #{}).
+
+pub(Server, Subject, Opts)
+  when is_map(Opts) ->
+    pub(Server, Subject, <<>>, Opts);
 pub(Server, Subject, Payload) ->
     pub(Server, Subject, Payload, #{}).
 
@@ -143,12 +165,26 @@ unsub(Server, SRef) ->
 unsub(Server, SRef, Opts) ->
     gen_statem:call(Server, {unsub, SRef, Opts}).
 
+disconnect(Server) ->
+    gen_statem:call(Server, disconnect).
+
+is_ready(Server) ->
+    try
+        gen_statem:call(Server, is_ready)
+    catch
+        exit:{timeout, _} ->
+            {error, timeout};
+        exit:_ ->
+            {error, not_found}
+    end.
+
 dump_subs(Server) ->
     gen_statem:call(Server, dump_subs).
 
 %%%===================================================================
 %%% gen_statem callbacks
 %%%===================================================================
+-define(CONNECT_TAG, '$connect').
 
 -spec callback_mode() -> gen_statem:callback_mode_result().
 callback_mode() -> [handle_event_function, state_enter].
@@ -162,15 +198,9 @@ init([Host, Port, Opts0]) ->
 
     Opts = maps:merge(?DEFAULT_OPTS, Opts0),
     ?LOG(debug, "SocketOpts: ~p", [socket_opts(Opts)]),
-    case gen_tcp:connect(Host, Port, socket_opts(Opts), ?CONNECT_TIMEOUT) of
-        {ok, Socket} ->
-            Data = init_data(Host, Port, Socket, Opts),
-            {ok, connected, Data};
-        {error, _} = Error ->
-            ?LOG(debug, "NATS client failed to open ~p TCP socket for connecting to ~s:~w with ~p",
-                 [family(Host), inet:ntoa(Host), Port, Error]),
-            Error
-    end.
+
+    Data = init_data(Host, Port, Opts),
+    {ok, connecting, Data}.
 
 -spec handle_event('enter',
                    OldState :: term(),
@@ -183,25 +213,98 @@ init([Host, Port, Opts0]) ->
                    Data :: term()) ->
           gen_statem:event_handler_result(data()).
 
-handle_event(enter, _, connected, #{socket := Socket}) ->
-    inet:setopts(Socket, [{active,once}]),
+handle_event({call, From}, is_ready, State, _Data) ->
+    {keep_state_and_data, [{reply, From, is_record(State, ready)}]};
+
+handle_event({call, From}, disconnect, State, Data)
+  when State =:= connected; is_record(State, ready) ->
+    {next_state, closed, close_socket(Data), [{reply, From, ok}]};
+handle_event({call, From}, disconnect, _State, Data) ->
+    {next_state, closed, Data, [{reply, From, ok}]};
+
+handle_event(enter, _, connecting, _) ->
+    self() ! ?CONNECT_TAG,
     keep_state_and_data;
-handle_event(enter, _, ready, #{socket := Socket}) ->
-    inet:setopts(Socket, [{active, true}]),
+
+handle_event(info, {?CONNECT_TAG, Pid, {ok, Socket}},
+             connecting, #{host := Host, port := Port, socket := Pid} = Data) ->
+    ?LOG(debug, "NATS client connected to ~s:~w", [fmt_host(Host), Port]),
+    {next_state, connected, Data#{socket := Socket}};
+
+handle_event(info, {{'DOWN', ?CONNECT_TAG}, _, process, Pid, Reason},
+             connecting, #{host := Host, port := Port, socket := Pid} = Data) ->
+    ?LOG(debug, "NATS client failed to open TCP socket for connecting to ~s:~w unexpectedly with ~p",
+         [fmt_host(Host), Port, Reason]),
+    notify_parent({error, Reason}, Data),
+    {next_state, closed, Data#{socket := undefined}};
+
+handle_event(info, {{'DOWN', ?CONNECT_TAG}, _, process, _, _}, _, _) ->
+    keep_state_and_data;
+
+handle_event(info, {?CONNECT_TAG, Pid, {error, _} = Error},
+             connecting, #{host := Host, port := Port, socket := Pid} = Data) ->
+    ?LOG(debug, "NATS client failed to open TCP socket for connecting to ~s:~w with ~p",
+         [fmt_host(Host), Port, Error]),
+    notify_parent(Error, Data),
+    {next_state, closed, Data#{socket := undefined}};
+
+handle_event(info, ?CONNECT_TAG, connecting, #{host := Host, port := Port} = Data) ->
+    case get_host_addr(Host) of
+        {ok, IP} ->
+            Owner = self(),
+            SocketOpts = socket_opts(Data),
+            {Pid, _} =
+                proc_lib:spawn_opt(
+                  fun() ->
+                          Result = gen_tcp:connect(IP, Port, SocketOpts, ?CONNECT_TIMEOUT),
+                          case Result of
+                              {ok, Socket} ->
+                                  ok = gen_tcp:controlling_process(Socket, Owner);
+                              _ ->
+                                  ok
+                          end,
+                          Owner ! {?CONNECT_TAG, self(), Result}
+                  end,
+                  [{monitor, [{tag, {'DOWN', ?CONNECT_TAG}}]}]),
+            {keep_state, Data#{socket := Pid}};
+        {error, _} = Error ->
+            ?LOG(debug, "NATS client failed to open TCP socket for connecting to ~s:~w with ~p",
+                 [fmt_host(Host), Port, Error]),
+            notify_parent(Error, Data),
+            {next_state, closed, Data}
+    end;
+
+handle_event(enter, _, closed, Data) ->
+    notify_parent(closed, Data),
+    {stop, normal};
+
+handle_event(enter, _, connected, #{socket := Socket}) ->
+    ?LOG(debug, "NATS enter connected state, socket ~p", [Socket]),
+    ok = inet:setopts(Socket, [{active,once}]),
+    keep_state_and_data;
+handle_event(enter, OldState, State, #{socket := Socket} = Data)
+  when not is_record(OldState, ready), is_record(State, ready) ->
+    ?LOG(debug, "NATS enter ready state"),
+    ok = inet:setopts(Socket, [{active, true}]),
+    notify_parent(ready, Data),
+    keep_state_and_data;
+handle_event(enter, _, State, _Data)
+  when is_record(State, ready) ->
     keep_state_and_data;
 
 handle_event(info, {tcp_error, Socket, Reason}, _, #{socket := Socket} = Data) ->
     log_connection_error(Reason, Data),
-    {next_state, disconnected, close_socket(Data)};
+    {next_state, closed, close_socket(Data)};
 handle_event(info, {tcp_closed, Socket}, _, #{socket := Socket} = Data) ->
-    {next_state, disconnected, close_socket(Data)};
+    {next_state, closed, close_socket(Data)};
 
 handle_event(info, {tcp, Socket, Bin}, State, #{socket := Socket} = Data)
-  when State =:= connected; State =:= ready ->
+  when State =:= connected; is_record(State, ready) ->
     ?LOG(debug, "got data: ~p", [Bin]),
     handle_message(Bin, State, Data);
 
-handle_event(info, batch_timeout, ready, #{batch := Batch} = Data) ->
+handle_event(info, batch_timeout, State, #{batch := Batch} = Data)
+  when is_record(State, ready) ->
     send(Batch, Data),
     {keep_state, Data#{batch_size := 0, batch := [], batch_timer := undefined}};
 
@@ -212,17 +315,33 @@ handle_event(info, {'DOWN', _MRef, process, Pid, normal}, _, Data) ->
     true = length(Sids) =:= del_pid_subs(Pid, Data),
     keep_state_and_data;
 
-handle_event({call, _From}, _, connected, _Data) ->
-    postpone;
-handle_event({call, From}, _, State, _Data) when State /= ready ->
-    {keep_state_and_data, [{reply, From, {error, not_connected}}]};
+handle_event({call, _From}, _, State, _Data)
+  when State =:= connecting; State =:= connected  ->
+    {keep_state_and_data, [postpone]};
+handle_event({call, _From}, _, #ready{pending = Pending}, _Data)
+  when Pending /= undefined ->
+    {keep_state_and_data, [postpone]};
+handle_event({call, From}, _, State, _Data)
+  when not is_record(State, ready) ->
+    {keep_state_and_data, [{reply, From, {error, not_ready}}]};
 
-handle_event({call, From}, {pub, Subject, Payload, Opts}, _State, Data) ->
+handle_event({call, From}, {pub, Subject, Payload, #{header := Header} = Opts}, State, Data) ->
+    HdrToSend =
+        if is_binary(Header) orelse is_list(Header) ->
+                Header;
+           true ->
+                <<>>
+        end,
+    ReplyTo = maps:get(reply_to, Opts, undefined),
+    Msg = nats_msg:hpub(Subject, ReplyTo, HdrToSend, Payload),
+    send_msg_with_reply(From, ok, Msg, State, Data);
+
+handle_event({call, From}, {pub, Subject, Payload, Opts}, State, Data) ->
     ReplyTo = maps:get(reply_to, Opts, undefined),
     Msg = nats_msg:pub(Subject, ReplyTo, Payload),
-    {keep_state, enqueue_msg(Msg, Data), [{reply, From, ok}]};
+    send_msg_with_reply(From, ok, Msg, State, Data);
 
-handle_event({call, From}, {sub, Subject, Opts, NotifyPid}, _State, Data0) ->
+handle_event({call, From}, {sub, Subject, Opts, NotifyPid}, State, Data0) ->
     {NatsSid, Sid, Data} = make_sub_id(Data0),
     monitor_sub_pid(NotifyPid, Data),
     put_pid_sub(NotifyPid, Sid, Data),
@@ -230,9 +349,9 @@ handle_event({call, From}, {sub, Subject, Opts, NotifyPid}, _State, Data0) ->
 
     QueueGrp = maps:get(queue_group, Opts, undefined),
     Msg = nats_msg:sub(Subject, QueueGrp, NatsSid),
-    {keep_state, enqueue_msg(Msg, Data), [{reply, From, {ok, Sid}}]};
+    send_msg_with_reply(From, {ok, Sid}, Msg, State, Data);
 
-handle_event({call, From}, {unsub, {'$sid', NatsSid} = Sid, Opts}, _State, Data) ->
+handle_event({call, From}, {unsub, {'$sid', NatsSid} = Sid, Opts}, State, Data) ->
     case get_sid_session(Sid, Data) of
         [#sub_session{pid = NotifyPid}] ->
             case Opts of
@@ -246,10 +365,12 @@ handle_event({call, From}, {unsub, {'$sid', NatsSid} = Sid, Opts}, _State, Data)
 
             MaxMsgs = maps:get(max_messages, Opts, undefined),
             Msg = nats_msg:unsub(integer_to_binary(NatsSid), MaxMsgs),
-            {keep_state, enqueue_msg(Msg, Data), [{reply, From, ok}]};
+            send_msg_with_reply(From, ok, Msg, State, Data);
         _ ->
-            {keep_state_and_data, [{reply, From, {error, invalid_session_ref}}]}
+            {keep_state_and_data, [{reply, From, {error, {invalid_session_ref, Sid}}}]}
     end;
+handle_event({call, From}, {unsub, Sid, _Opts}, _State, _Data) ->
+    {keep_state_and_data, [{reply, From, {error, {invalid_session_ref, Sid}}}]};
 
 handle_event({call, From}, dump_subs, _State, #{tid := Tid}) ->
     {keep_state_and_data, [{reply, From, ets:tab2list(Tid)}]};
@@ -269,10 +390,34 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %%% State Helper functions
 %%%===================================================================
 
+send_msg_with_reply(From, Reply, Msg,
+                    #ready{pending = undefined} = State, #{verbose := true} = Data) ->
+    Action = {reply, From, Reply},
+    {next_state, State#ready{pending = Action}, enqueue_msg(Msg, Data)};
+send_msg_with_reply(From, Reply, Msg, #ready{pending = undefined}, Data) ->
+    {keep_state, enqueue_msg(Msg, Data), [{reply, From, Reply}]}.
+
+socket_active(connected, connected, #{socket := Socket}) ->
+    inet:setopts(Socket, [{active,once}]);
+socket_active(_, _, _) ->
+    ok.
+
+notify_parent(Msg, #{parent := Parent}) when is_pid(Parent) ->
+    Parent ! {self(), Msg};
+notify_parent(_, _) ->
+    ok.
+
 handle_message(Bin, State0, #{recv_buffer := Acc0} = Data0) ->
     {{State, Data}, Acc} =
         nats_msg:decode(<<Acc0/binary, Bin/binary>>, {fun handle_nats_msg/2, {State0, Data0}}),
+    socket_active(State0, State, Data),
     {next_state, State, Data#{recv_buffer := Acc}}.
+
+handle_nats_msg(ok, {#ready{pending = ok} = State, Data}) ->
+    {stop, {State#ready{pending = undefined}, Data}};
+handle_nats_msg(ok, {#ready{pending = {reply, From, Reply}} = State, Data}) ->
+    gen_statem:reply(From, Reply),
+    {stop, {State#ready{pending = undefined}, Data}};
 
 handle_nats_msg(stop, DecState) ->
     {stop, DecState};
@@ -281,26 +426,48 @@ handle_nats_msg(ping, {connected, Data} = DecState) ->
     send(nats_msg:pong(), Data),
     {continue, DecState};
 
-handle_nats_msg(ping, {ready, Data0}) ->
+handle_nats_msg(ping, {State, Data0})
+  when is_record(State, ready) ->
     Data = flush_batch(enqueue_msg_no_check(nats_msg:pong(), Data0)),
-    {continue, {ready, Data}};
+    {continue, {State, Data}};
 
 handle_nats_msg({info, Payload} = Msg, {connected, Data0}) ->
    ?LOG(debug, "NATS Info Msg: ~p", [Msg]),
     case handle_nats_info(Payload, Data0) of
-        {ok, Data} ->
-            {stop, {ready, Data}};
+        {ok, State, Data} ->
+            {stop, {State, Data}};
         {error, _} ->
-            {stop, {disconnected, Data0}}
+            {stop, {closed, Data0}}
     end;
 
-handle_nats_msg({msg, {Subject, NatsSid, ReplyTo, Payload}} = Msg, {ready, Data}) ->
+handle_nats_msg({msg, {Subject, NatsSid, ReplyTo, Payload}} = Msg, {State, Data})
+  when is_record(State, ready) ->
     ?LOG(debug, "got msg: ~p", [Msg]),
+    Opts = reply_opt(ReplyTo, #{}),
+    handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, Data),
+    {continue, {State, Data}};
+
+handle_nats_msg({hmsg, {Subject, NatsSid, ReplyTo, Header, Payload}} = Msg, {State, Data})
+  when is_record(State, ready) ->
+    ?LOG(debug, "got msg: ~p", [Msg]),
+    Opts = reply_opt(ReplyTo, #{header => Header}),
+    handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, Data),
+    {continue, {State, Data}};
+handle_nats_msg(Msg, DecState) ->
+    ?LOG("NATS Msg: ~p", [Msg]),
+    {continue, DecState}.
+
+reply_opt(ReplyTo, Opts) when is_binary(ReplyTo) ->
+    Opts#{reply_to => ReplyTo};
+reply_opt(_, Opts) ->
+    Opts.
+
+handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, Data) ->
     Sid = {'$sid', binary_to_integer(NatsSid)},
     case get_sid_session(Sid, Data) of
         [#sub_session{pid = NotifyPid, max_msgs = MaxMsgs}] ->
-            Resp = {msg, Subject, ReplyTo, Payload},
-            NotifyPid ! {Sid, Resp},
+            Resp = {msg, Subject, Payload, Opts},
+            NotifyPid ! {self(), Sid, Resp},
 
             case MaxMsgs of
                 0 ->
@@ -316,12 +483,7 @@ handle_nats_msg({msg, {Subject, NatsSid, ReplyTo, Payload}} = Msg, {ready, Data}
             end;
         _ ->
             ok
-    end,
-    {continue, {ready, Data}};
-
-handle_nats_msg(Msg, DecState) ->
-    ?LOG("NATS Msg: ~p", [Msg]),
-    {continue, DecState}.
+    end.
 
 handle_nats_info(Payload, Data0) ->
     try json:decode(Payload, ok, #{object_push => fun json_object_push/3}) of
@@ -331,7 +493,12 @@ handle_nats_info(Payload, Data0) ->
                 {ok, Data} = ssl_upgrade(JSON, Data0#{server_info := JSON}),
                 ?LOG(debug, "NATS Client Info: ~p", [client_info(Data)]),
                 send(client_info(Data), Data),
-                {ok, Data}
+                case Data of
+                    #{verbose := true} ->
+                        {ok, #ready{pending = ok}, Data};
+                    _ ->
+                        {ok, #ready{}, Data}
+                end
             end
     catch
         E:C ->
@@ -389,7 +556,7 @@ flush_batch(Data0) ->
 
 client_info(#{server_info := ServerInfo} = Data) ->
     %% Include user and name iff the server requires it
-    FieldsList = [verbose, pedantic, ssl_required, auth_token, name, lang, version],
+    FieldsList = [verbose, pedantic, headers, ssl_required, auth_token, name, lang, version],
     NewFieldsList =
         case maps:get(auth_required, ServerInfo, false) of
             true -> [user, pass | FieldsList];
@@ -477,15 +644,33 @@ del_sid_session({'$sid', _} = Sid, #{tid := Tid}) ->
 %%% Internal functions
 %%%===================================================================
 
+fmt_host(IP)
+  when is_tuple(IP) andalso (tuple_size(IP) =:= 4 orelse tuple_size(IP) =:= 8) ->
+    inet:ntoa(IP);
+fmt_host(Host) when is_list(Host); is_binary(Host) ->
+    Host.
+
+get_host_addr({_, _, _, _} = IP) ->
+    {ok, IP};
+get_host_addr({_, _, _, _, _, _, _, _} = IP) ->
+    {ok, IP};
+get_host_addr(Bin) when is_binary(Bin) ->
+    get_host_addr(binary_to_list(Bin));
+get_host_addr(Host) when is_list(Host) ->
+    maybe
+        {error, _} ?= inet:getaddrs(Host, inet6),
+        {error, _} ?= inet:getaddrs(Host, inet)
+    else
+        {ok, IPs} ->
+            {ok, lists:nth(rand:uniform(length(IPs)), IPs)}
+    end.
+
 json_object_push(Key, Value, Acc) ->
     K = try binary_to_existing_atom(Key) catch _:_ -> Key end,
     [{K, Value} | Acc].
 
-family({_,_,_,_}) -> inet;
-family({_,_,_,_,_,_,_,_}) -> inet6.
-
 socket_opts(Opts) ->
-    SockOpts = maps:merge(?DEFAULT_SOCKET_OPTS, maps:get(socket, Opts, #{})),
+    SockOpts = maps:merge(?DEFAULT_SOCKET_OPTS, maps:get(socket_opts, Opts, #{})),
     maps:fold(fun make_socket_opt/3, [{active, false}, binary, {packet, 0}], SockOpts).
 
 make_socket_opt(netns, NetNs, Opts) ->
@@ -501,8 +686,8 @@ make_socket_opt(reuseaddr, V, Opts) ->
 make_socket_opt(_, _, Opts) ->
     Opts.
 
-init_data(Host, Port, Socket, Opts) ->
-    Data = #{socket => Socket,
+init_data(Host, Port, Opts) ->
+    Data = #{socket => undefined,
              tls => false,
              server_info => undefined,
 

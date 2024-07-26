@@ -27,7 +27,9 @@
          unsub/2,
          unsub/3,
          disconnect/1,
-         is_ready/1]).
+         is_ready/1,
+         request/4
+        ]).
 
 %% debug functions
 -export([dump_subs/1]).
@@ -89,14 +91,16 @@
                  }.
 
 -type data() :: #{socket         := undefined | gen_tcp:socket() | ssl:socket(),
-                  tls            := boolean,
+                  tls            := boolean(),
                   server_info    := map(),
                   recv_buffer    := binary(),
                   batch          := iolist(),
                   batch_size     := non_neg_integer(),
                   batch_timer    := undefined | reference(),
 
+                  sid            := non_neg_integer(),
                   tid            := ets:tid(),
+                  inbox          := undefined | binary(),
 
                   %% Opts
                   parent         := pid(),
@@ -123,6 +127,8 @@
 -record(sub, {pid, sid}).
 -record(sub_session, {pid, max_msgs}).
 -record(ready, {pending}).
+-record(inbox, {}).
+-record(req, {req_id}).
 
 %%%===================================================================
 %%% API
@@ -167,6 +173,20 @@ unsub(Server, SRef) ->
     unsub(Server, SRef, #{}).
 unsub(Server, SRef, Opts) ->
     gen_statem:call(Server, {unsub, SRef, Opts}).
+
+%% request(Server, Subject, Payload, Opts) ->
+%%     gen_statem:call(Server, {request, Subject, Payload, Opts}).
+
+request(Server, Subject, Payload, Opts) ->
+    maybe
+        {ok, Inbox} ?= gen_statem:call(Server, get_inbox_topic),
+        case gen_statem:call(Server, {request, Subject, Inbox, Payload, Opts}) of
+            {ok, {_, #{header := <<"NATS/1.0 503\r\n", _/binary>>}}} ->
+                    {error, no_responders};
+            Reply ->
+                Reply
+        end
+    end.
 
 disconnect(Server) ->
     gen_statem:call(Server, disconnect).
@@ -314,7 +334,7 @@ handle_event(info, batch_timeout, State, #{batch := Batch} = Data)
 handle_event(info, {'DOWN', _MRef, process, Pid, normal}, _, Data) ->
     del_pid_monitor(Pid, Data),
     Sids = get_pid_subs(Pid, Data),
-    lists:foreach(fun(X) -> del_sid_session(X, Data) end, Sids),
+    lists:foreach(fun(X) -> del_sid(X, Data) end, Sids),
     true = length(Sids) =:= del_pid_subs(Pid, Data),
     keep_state_and_data;
 
@@ -328,20 +348,8 @@ handle_event({call, From}, _, State, _Data)
   when not is_record(State, ready) ->
     {keep_state_and_data, [{reply, From, {error, not_ready}}]};
 
-handle_event({call, From}, {pub, Subject, Payload, #{header := Header} = Opts}, State, Data) ->
-    HdrToSend =
-        if is_binary(Header) orelse is_list(Header) ->
-                Header;
-           true ->
-                <<>>
-        end,
-    ReplyTo = maps:get(reply_to, Opts, undefined),
-    Msg = nats_msg:hpub(Subject, ReplyTo, HdrToSend, Payload),
-    send_msg_with_reply(From, ok, Msg, State, Data);
-
 handle_event({call, From}, {pub, Subject, Payload, Opts}, State, Data) ->
-    ReplyTo = maps:get(reply_to, Opts, undefined),
-    Msg = nats_msg:pub(Subject, ReplyTo, Payload),
+    Msg = mk_pub_msg(Subject, Payload, Opts),
     send_msg_with_reply(From, ok, Msg, State, Data);
 
 handle_event({call, From}, {sub, Subject, Opts, NotifyPid}, State, Data0) ->
@@ -355,13 +363,13 @@ handle_event({call, From}, {sub, Subject, Opts, NotifyPid}, State, Data0) ->
     send_msg_with_reply(From, {ok, Sid}, Msg, State, Data);
 
 handle_event({call, From}, {unsub, {'$sid', NatsSid} = Sid, Opts}, State, Data) ->
-    case get_sid_session(Sid, Data) of
+    case get_sid(Sid, Data) of
         [#sub_session{pid = NotifyPid}] ->
             case Opts of
                 #{max_messages := MaxMsgsOpt} when is_integer(MaxMsgsOpt) ->
                     put_sid_session(Sid, NotifyPid, MaxMsgsOpt, Data);
                 _ ->
-                    del_sid_session(Sid, Data),
+                    del_sid(Sid, Data),
                     del_pid_sub(NotifyPid, Sid, Data),
                     demonitor_sub_pid(NotifyPid, Data)
             end,
@@ -374,6 +382,27 @@ handle_event({call, From}, {unsub, {'$sid', NatsSid} = Sid, Opts}, State, Data) 
     end;
 handle_event({call, From}, {unsub, Sid, _Opts}, _State, _Data) ->
     {keep_state_and_data, [{reply, From, {error, {invalid_session_ref, Sid}}}]};
+
+handle_event({call, From}, get_inbox_topic, _State, #{inbox := Inbox})
+  when is_binary(Inbox) ->
+    {keep_state_and_data, [{reply, From, {ok, Inbox}}]};
+handle_event({call, From}, get_inbox_topic, State, Data0) ->
+    Inbox = <<"_INBOX.", (rnd_topic_id())/binary, $.>>,
+    {NatsSid, Sid, Data} = make_sub_id(Data0),
+    put_sid_inbox(Sid, Data),
+
+    Subject = <<Inbox/binary, $*>>,
+    Msg = nats_msg:sub(Subject, NatsSid),
+    send_msg_with_reply(From, {ok, Inbox}, Msg, State, Data#{inbox => Inbox});
+
+handle_event({call, From}, {request, Subject, Inbox, Payload, Opts}, State, Data) ->
+    ReqId = rnd_request_id(),
+    ReqInbox = <<Inbox/binary, ReqId/binary>>,
+
+    put_inbox_reqid(ReqId, From, Data),
+
+    Msg = mk_pub_msg(Subject, Payload, Opts#{reply_to => ReqInbox}),
+    send_msg(Msg, State, Data);
 
 handle_event({call, From}, dump_subs, _State, #{tid := Tid}) ->
     {keep_state_and_data, [{reply, From, ets:tab2list(Tid)}]};
@@ -392,6 +421,25 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %%%===================================================================
 %%% State Helper functions
 %%%===================================================================
+
+mk_pub_msg(Subject, Payload, #{header := Header} = Opts) ->
+    HdrToSend =
+        if is_binary(Header) orelse is_list(Header) ->
+                Header;
+           true ->
+                <<>>
+        end,
+    ReplyTo = maps:get(reply_to, Opts, undefined),
+    nats_msg:hpub(Subject, ReplyTo, HdrToSend, Payload);
+
+mk_pub_msg(Subject, Payload, Opts) ->
+    ReplyTo = maps:get(reply_to, Opts, undefined),
+    nats_msg:pub(Subject, ReplyTo, Payload).
+
+send_msg(Msg, #ready{pending = undefined} = State, #{verbose := true} = Data) ->
+    {next_state, State#ready{pending = ok}, enqueue_msg(Msg, Data)};
+send_msg(Msg, #ready{pending = undefined}, Data) ->
+    {keep_state, enqueue_msg(Msg, Data)}.
 
 send_msg_with_reply(From, Reply, Msg,
                     #ready{pending = undefined} = State, #{verbose := true} = Data) ->
@@ -416,14 +464,14 @@ handle_message(Bin, State0, #{recv_buffer := Acc0} = Data0) ->
     socket_active(State0, State, Data),
     {next_state, State, Data#{recv_buffer := Acc}}.
 
-handle_nats_msg(ok, {#ready{pending = ok} = State, Data}) ->
-    {stop, {State#ready{pending = undefined}, Data}};
-handle_nats_msg(ok, {#ready{pending = {reply, From, Reply}} = State, Data}) ->
-    gen_statem:reply(From, Reply),
-    {stop, {State#ready{pending = undefined}, Data}};
-
 handle_nats_msg(stop, DecState) ->
     {stop, DecState};
+
+handle_nats_msg(ok, {#ready{pending = ok} = State, Data}) ->
+    {continue, {State#ready{pending = undefined}, Data}};
+handle_nats_msg(ok, {#ready{pending = {reply, From, Reply}} = State, Data}) ->
+    gen_statem:reply(From, Reply),
+    {continue, {State#ready{pending = undefined}, Data}};
 
 handle_nats_msg(ping, {connected, Data} = DecState) ->
     send(nats_msg:pong(), Data),
@@ -467,7 +515,7 @@ reply_opt(_, Opts) ->
 
 handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, Data) ->
     Sid = {'$sid', binary_to_integer(NatsSid)},
-    case get_sid_session(Sid, Data) of
+    case get_sid(Sid, Data) of
         [#sub_session{pid = NotifyPid, max_msgs = MaxMsgs}] ->
             Resp = {msg, Subject, Payload, Opts},
             NotifyPid ! {self(), Sid, Resp},
@@ -478,13 +526,33 @@ handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, Data) ->
                     ok;
                 1 ->
                     ?LOG(debug, "NATS: Auto-removing subscription, limit reached for sid '~s'", [NatsSid]),
-                    del_sid_session(Sid, Data),
+                    del_sid(Sid, Data),
                     del_pid_sub(NotifyPid, Sid, Data),
                     demonitor_sub_pid(NotifyPid, Data);
                 _ ->
                     put_sid_session(Sid, NotifyPid, MaxMsgs - 1, Data)
             end;
+        [#inbox{}] ->
+            ?LOG(debug, "NATS msg for global INBOX"),
+            handle_nats_inbox_msg(Subject, Payload, Opts, Data);
+        _Other ->
+            ?LOG(debug, "NATS msg for unexpected sid ~w: ~p", [NatsSid, _Other]),
+            ok
+    end.
+
+handle_nats_inbox_msg(Subject, Payload, Opts, #{inbox := Inbox} = Data) ->
+    case Subject of
+        <<Inbox:(byte_size(Inbox))/bytes, ReqId/binary>> ->
+            ?LOG(debug, "NATS inbox msg with request id: ~0p", [ReqId]),
+            case take_inbox_reqid(ReqId, Data) of
+                [From] ->
+                    gen_statem:reply(From, {ok, {Payload, Opts}});
+                [] ->
+                    ok
+            end;
         _ ->
+            ?LOG(debug, "NATS inbox msg with invalid structure: ~0p, Inbox: ~0p",
+                 [Subject, Inbox]),
             ok
     end.
 
@@ -616,6 +684,15 @@ demonitor_sub_pid(NotifyPid, Data) ->
             ok
     end.
 
+put_inbox_reqid(ReqId, From, #{tid := Tid}) ->
+    true = ets:insert(Tid, {#req{req_id = ReqId}, From}).
+
+take_inbox_reqid(ReqId, #{tid := Tid}) ->
+    case ets:take(Tid, #req{req_id = ReqId}) of
+        [{_, From}] -> [From];
+        [] -> []
+    end.
+
 put_pid_sub(Pid, Sid, #{tid := Tid}) ->
     true = ets:insert(Tid, {#sub{pid = Pid, sid = Sid}}).
 
@@ -637,16 +714,37 @@ count_pid_sub(Pid, #{tid := Tid}) ->
 put_sid_session(Sid, Pid, MaxMsgs, #{tid := Tid}) ->
     true = ets:insert(Tid, {Sid, #sub_session{pid = Pid, max_msgs = MaxMsgs}}).
 
-get_sid_session({'$sid', _} = Sid, #{tid := Tid}) ->
+put_sid_inbox(Sid, #{tid := Tid}) ->
+    true = ets:insert(Tid, {Sid, #inbox{}}).
+
+get_sid({'$sid', _} = Sid, #{tid := Tid}) ->
     Ms = [{{Sid, '$1'}, [], ['$1']}],
     ets:select(Tid, Ms).
 
-del_sid_session({'$sid', _} = Sid, #{tid := Tid}) ->
+del_sid({'$sid', _} = Sid, #{tid := Tid}) ->
     true = ets:delete(Tid, Sid).
 
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+rnd_topic_id() ->
+    base62enc(rand:uniform(16#ffffffffffffffffffffffffffffffff)).
+
+rnd_request_id() ->
+    base62enc(rand:uniform(16#ffffffffffffffff)).
+
+base62(I) when I < 10 ->
+    $0 + I;
+base62(I) when I >= 10, I < 36 ->
+    $A - 10 + I;
+base62(I) when I >= 36, I < 62 ->
+    $a - 36 + I.
+
+base62enc(0) ->
+    <<>>;
+base62enc(I) ->
+    << (base62enc(I div 62))/binary, (base62(I rem 62))>>.
 
 fmt_host(IP)
   when is_tuple(IP) andalso (tuple_size(IP) =:= 4 orelse tuple_size(IP) =:= 8) ->
@@ -703,6 +801,8 @@ init_data(Host, Port, Opts) ->
 
              sid => 1,
              tid => ets:new(?MODULE, [private, set]),
+
+             inbox => undefined,
 
              host => Host,
              port => Port},

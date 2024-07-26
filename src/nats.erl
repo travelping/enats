@@ -45,14 +45,15 @@
 -define(DEFAULT_OPTS,
         #{verbose => false,
           pedantic => false,
-          headers => true,
-          ssl_required => false,
+          tls_required => false,
           auth_token => undefined,
           user => undefined,
           pass => undefined,
           name => <<"nats">>,
           lang => <<"Erlang">>,
           version => ?VERSION,
+          headers => true,
+          no_responders => true,
           buffer_size => 0,
           max_batch_size => ?DEFAULT_MAX_BATCH_SIZE,
           send_timeout => ?DEFAULT_SEND_TIMEOUT
@@ -73,14 +74,15 @@
 -type opts() :: #{socket_opts    => socket_opts(),
                   verbose        => boolean(),
                   pedantic       => boolean(),
-                  headers        => boolean(),
-                  ssl_required   => boolean(),
+                  tls_required   => boolean(),
                   auth_token     => binary(),
                   user           => binary(),
                   pass           => binary(),
                   name           => binary(),
                   lang           => binary(),
                   version        => binary(),
+                  headers        => boolean(),
+                  no_responders  => boolean(),
                   buffer_size    => non_neg_integer(),
                   max_batch_size => non_neg_integer(),
                   send_timeout   => non_neg_integer()
@@ -103,14 +105,15 @@
                   socket_opts    := socket_opts(),
                   verbose        := boolean(),
                   pedantic       := boolean(),
-                  headers        := boolean(),
-                  ssl_required   := boolean(),
+                  tls_required   := boolean(),
                   auth_token     := undefined | binary(),
                   user           := undefined | binary(),
                   pass           := undefined | binary(),
                   name           := binary(),
                   lang           := binary(),
                   version        := binary(),
+                  headers        := boolean(),
+                  no_responders  := boolean(),
                   buffer_size    := non_neg_integer(),
                   max_batch_size := non_neg_integer(),
                   send_timeout   := non_neg_integer()
@@ -556,7 +559,8 @@ flush_batch(Data0) ->
 
 client_info(#{server_info := ServerInfo} = Data) ->
     %% Include user and name iff the server requires it
-    FieldsList = [verbose, pedantic, headers, ssl_required, auth_token, name, lang, version],
+    FieldsList = [verbose, pedantic, tls_required, auth_token, name, lang,
+                  version, headers, no_responders],
     NewFieldsList =
         case maps:get(auth_required, ServerInfo, false) of
             true -> [user, pass | FieldsList];

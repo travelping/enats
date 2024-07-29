@@ -28,11 +28,23 @@
          unsub/3,
          disconnect/1,
          is_ready/1,
-         request/4
+         request/4,
+         serve/2
         ]).
+-export([service/4, endpoint/2]).
 
 %% debug functions
 -export([dump_subs/1]).
+
+-ignore_xref([connect/2, connect/3,
+              pub/2, pub/3, pub/4,
+              sub/2, sub/3,
+              unsub/2, unsub/3,
+              disconnect/1,
+              is_ready/1,
+              request/4,
+              serve/2, service/4, endpoint/2,
+              dump_subs/1]).
 
 %% gen_statem callbacks
 -export([callback_mode/0, init/1, terminate/3, code_change/4]).
@@ -40,7 +52,7 @@
 
 -define(MSG, ?MODULE).
 -define(VERSION, <<"0.4.1">>).
--define(DEFAULT_SEND_TIMEOUT, 10).
+-define(DEFAULT_SEND_TIMEOUT, 1).
 -define(DEFAULT_MAX_BATCH_SIZE, 100).
 -define(CONNECT_TIMEOUT, 1000).
 
@@ -64,6 +76,7 @@
         #{reuseaddr => true}).
 
 -include_lib("kernel/include/logger.hrl").
+-include_lib("stdlib/include/ms_transform.hrl").
 
 -type socket_opts() :: #{netns => string(),
                          netdev => binary(),
@@ -89,6 +102,17 @@
                   max_batch_size => non_neg_integer(),
                   send_timeout   => non_neg_integer()
                  }.
+
+-type endpoint() :: #{name        := binary(),
+                      group_name  => binary(),
+                      queue_group => binary(),
+                      metadata    => map()
+                     }.
+-type service() :: #{name        := binary(),
+                     version     := binary(),
+                     description => binary(),
+                     metadata    => map()
+                    }.
 
 -type data() :: #{socket         := undefined | gen_tcp:socket() | ssl:socket(),
                   tls            := boolean(),
@@ -129,6 +153,10 @@
 -record(ready, {pending}).
 -record(inbox, {}).
 -record(req, {req_id}).
+-record(svc_id, {name, id}).
+-record(service, {svc, op, endp, queue_group, subject}).
+-record(svc, {module, state, id, service, endpoints, started}).
+-record(endpoint, {function, id, endpoint}).
 
 %%%===================================================================
 %%% API
@@ -188,6 +216,9 @@ request(Server, Subject, Payload, Opts) ->
         end
     end.
 
+serve(Server, Service) ->
+    gen_statem:call(Server, {serve, Service}).
+
 disconnect(Server) ->
     gen_statem:call(Server, disconnect).
 
@@ -203,6 +234,15 @@ is_ready(Server) ->
 
 dump_subs(Server) ->
     gen_statem:call(Server, dump_subs).
+
+-spec service(service(),  nonempty_list(#endpoint{}), module(), any()) -> #svc{}.
+service(SvcDesc, EndpDesc, Module, State) ->
+    #svc{module = Module, state = State, service = SvcDesc, endpoints = EndpDesc}.
+
+-spec endpoint(endpoint(), atom()) -> #endpoint{}.
+endpoint(EndpDesc, Function) ->
+    #endpoint{function = Function,
+              endpoint = maps:merge(#{queue_group => ~"q", metadata => null}, EndpDesc)}.
 
 %%%===================================================================
 %%% gen_statem callbacks
@@ -352,8 +392,8 @@ handle_event({call, From}, {pub, Subject, Payload, Opts}, State, Data) ->
     Msg = mk_pub_msg(Subject, Payload, Opts),
     send_msg_with_reply(From, ok, Msg, State, Data);
 
-handle_event({call, From}, {sub, Subject, Opts, NotifyPid}, State, Data0) ->
-    {NatsSid, Sid, Data} = make_sub_id(Data0),
+handle_event({call, From}, {sub, Subject, Opts, NotifyPid}, State, Data) ->
+    {NatsSid, Sid} = make_sub_id(Data),
     monitor_sub_pid(NotifyPid, Data),
     put_pid_sub(NotifyPid, Sid, Data),
     put_sid_session(Sid, NotifyPid, 0, Data),
@@ -386,9 +426,9 @@ handle_event({call, From}, {unsub, Sid, _Opts}, _State, _Data) ->
 handle_event({call, From}, get_inbox_topic, _State, #{inbox := Inbox})
   when is_binary(Inbox) ->
     {keep_state_and_data, [{reply, From, {ok, Inbox}}]};
-handle_event({call, From}, get_inbox_topic, State, Data0) ->
+handle_event({call, From}, get_inbox_topic, State, Data) ->
     Inbox = <<"_INBOX.", (rnd_topic_id())/binary, $.>>,
-    {NatsSid, Sid, Data} = make_sub_id(Data0),
+    {NatsSid, Sid} = make_sub_id(Data),
     put_sid_inbox(Sid, Data),
 
     Subject = <<Inbox/binary, $*>>,
@@ -403,6 +443,52 @@ handle_event({call, From}, {request, Subject, Inbox, Payload, Opts}, State, Data
 
     Msg = mk_pub_msg(Subject, Payload, Opts#{reply_to => ReqInbox}),
     send_msg(Msg, State, Data);
+
+handle_event({call, From},
+             {serve, #svc{service = #{name := SvcName}, endpoints = EndPs} = Svc0},
+             State, Data) ->
+    Id = rnd_topic_id(),
+    Svc = Svc0#svc{started = erlang:system_time(second)},
+
+    Subs0 = lists:map(
+              fun (#endpoint{endpoint = #{name := OpName, queue_group := QueueGrp}} = EndP) ->
+                      service_sub_msg(SvcName, OpName, EndP#endpoint{id = Id},
+                                      <<SvcName/binary, $., OpName/binary>>, QueueGrp, Data)
+              end, EndPs),
+    SvcIdName = <<SvcName/binary, $., Id/binary>>,
+    Subs1 =
+        [service_sub_msg(SvcName, '$stats', Id, <<"$SRV.STATS.", SvcIdName/binary>>, Data),
+         service_sub_msg(SvcName, '$info', Id, <<"$SRV.INFO.", SvcIdName/binary>>, Data),
+         service_sub_msg(SvcName, '$ping', Id, <<"$SRV.PING.", SvcIdName/binary>>, Data)
+        | Subs0],
+
+    Subs2 =
+        case get_svcs(SvcName, Data) of
+            [] ->
+                [service_sub_msg(SvcName, '$stats', '$service',
+                                 <<"$SRV.STATS.", SvcName/binary>>, Data),
+                 service_sub_msg(SvcName, '$info', '$service',
+                                 <<"$SRV.INFO.", SvcName/binary>>, Data),
+                 service_sub_msg(SvcName, '$ping', '$service',
+                                 <<"$SRV.PING.", SvcName/binary>>, Data)
+                | Subs1];
+            _ ->
+                Subs1
+        end,
+    Subs =
+        case Data of
+            #{srv_init := false} ->
+                [service_sub_msg('$srv', '$stats', '$all', ~"$SRV.STATS", Data),
+                 service_sub_msg('$srv', '$info', '$all', ~"$SRV.INFO", Data),
+                 service_sub_msg('$srv', '$ping', '$all', ~"$SRV.PING", Data)
+                | Subs2];
+            _ ->
+                Subs2
+        end,
+    put_svc(SvcName, Id, Svc#svc{id = Id}, Data),
+
+    Action = {reply, From, ok},
+    next_state_enqueue_batch(Subs, Action, State, Data);
 
 handle_event({call, From}, dump_subs, _State, #{tid := Tid}) ->
     {keep_state_and_data, [{reply, From, ets:tab2list(Tid)}]};
@@ -421,6 +507,20 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %%%===================================================================
 %%% State Helper functions
 %%%===================================================================
+
+service_sub_msg(SvcName, Op, Id, Subject, Data) ->
+    service_sub_msg(SvcName, Op, Id, Subject, undefined, Data).
+
+service_sub_msg(SvcName, Op, Id, Subject, QueueGrp, Data) ->
+    {NatsSid, Sid} = make_sub_id(Data),
+    Svc = #service{
+             svc = SvcName,
+             op = Op,
+             endp = Id,
+             queue_group = QueueGrp,
+             subject = Subject},
+    put_sid_service(Sid, Svc, Data),
+    nats_msg:sub(Subject, QueueGrp, NatsSid).
 
 mk_pub_msg(Subject, Payload, #{header := Header} = Opts) ->
     HdrToSend =
@@ -459,13 +559,18 @@ notify_parent(_, _) ->
     ok.
 
 handle_message(Bin, State0, #{recv_buffer := Acc0} = Data0) ->
-    {{State, Data}, Acc} =
+    {{State, Data1}, Acc} =
         nats_msg:decode(<<Acc0/binary, Bin/binary>>, {fun handle_nats_msg/2, {State0, Data0}}),
+    Data = Data1#{recv_buffer := Acc},
     socket_active(State0, State, Data),
-    {next_state, State, Data#{recv_buffer := Acc}}.
+    {next_state, State, Data}.
 
 handle_nats_msg(stop, DecState) ->
     {stop, DecState};
+
+handle_nats_msg(ok, {#ready{pending = Pending} = State, #{send_q := [Msg|More]} = Data})
+  when Pending /= undefined ->
+    {continue, {State, enqueue_msg(Msg, Data#{send_q := More})}};
 
 handle_nats_msg(ok, {#ready{pending = ok} = State, Data}) ->
     {continue, {State#ready{pending = undefined}, Data}};
@@ -491,19 +596,18 @@ handle_nats_msg({info, Payload} = Msg, {connected, Data0}) ->
             {stop, {closed, Data0}}
     end;
 
-handle_nats_msg({msg, {Subject, NatsSid, ReplyTo, Payload}} = Msg, {State, Data})
+handle_nats_msg({msg, {Subject, NatsSid, ReplyTo, Payload}} = Msg, {State, _} = DecState)
   when is_record(State, ready) ->
     ?LOG(debug, "got msg: ~p", [Msg]),
     Opts = reply_opt(ReplyTo, #{}),
-    handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, Data),
-    {continue, {State, Data}};
+    handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, DecState);
 
-handle_nats_msg({hmsg, {Subject, NatsSid, ReplyTo, Header, Payload}} = Msg, {State, Data})
+handle_nats_msg({hmsg, {Subject, NatsSid, ReplyTo, Header, Payload}} = Msg,
+                {State, _} = DecState)
   when is_record(State, ready) ->
     ?LOG(debug, "got msg: ~p", [Msg]),
     Opts = reply_opt(ReplyTo, #{header => Header}),
-    handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, Data),
-    {continue, {State, Data}};
+    handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, DecState);
 handle_nats_msg(Msg, DecState) ->
     ?LOG("NATS Msg: ~p", [Msg]),
     {continue, DecState}.
@@ -513,7 +617,7 @@ reply_opt(ReplyTo, Opts) when is_binary(ReplyTo) ->
 reply_opt(_, Opts) ->
     Opts.
 
-handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, Data) ->
+handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, {_, Data} = DecState) ->
     Sid = {'$sid', binary_to_integer(NatsSid)},
     case get_sid(Sid, Data) of
         [#sub_session{pid = NotifyPid, max_msgs = MaxMsgs}] ->
@@ -531,16 +635,21 @@ handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, Data) ->
                     demonitor_sub_pid(NotifyPid, Data);
                 _ ->
                     put_sid_session(Sid, NotifyPid, MaxMsgs - 1, Data)
-            end;
+            end,
+            {continue, DecState};
         [#inbox{}] ->
             ?LOG(debug, "NATS msg for global INBOX"),
-            handle_nats_inbox_msg(Subject, Payload, Opts, Data);
+            handle_nats_inbox_msg(Subject, Payload, Opts, DecState);
+        [#service{svc = SvcName} = Service] ->
+            ?LOG(debug, "## SERVICE: ~p", [Service]),
+            ?LOG(debug, "NATS msg for service '~p'", [SvcName]),
+            handle_nats_service_msg(Service, Subject, Payload, Opts, DecState);
         _Other ->
             ?LOG(debug, "NATS msg for unexpected sid ~w: ~p", [NatsSid, _Other]),
-            ok
+            {continue, DecState}
     end.
 
-handle_nats_inbox_msg(Subject, Payload, Opts, #{inbox := Inbox} = Data) ->
+handle_nats_inbox_msg(Subject, Payload, Opts, {_, #{inbox := Inbox} = Data} = DecState) ->
     case Subject of
         <<Inbox:(byte_size(Inbox))/bytes, ReqId/binary>> ->
             ?LOG(debug, "NATS inbox msg with request id: ~0p", [ReqId]),
@@ -554,7 +663,192 @@ handle_nats_inbox_msg(Subject, Payload, Opts, #{inbox := Inbox} = Data) ->
             ?LOG(debug, "NATS inbox msg with invalid structure: ~0p, Inbox: ~0p",
                  [Subject, Inbox]),
             ok
-    end.
+    end,
+    {continue, DecState}.
+
+service_info_msg(ReplyTo, #svc{id = Id, service = Service, endpoints = EndPs}) ->
+    {ok, VSN} = application:get_key(nats, vsn),
+    Endpoints =
+        lists:map(
+          fun(#endpoint{endpoint = #{name := Name} = EndP}) ->
+                  maps:with(
+                    [name, subject, queue_group, metadata],
+                    EndP#{subject => <<Id/binary, $., Name/binary>>})
+          end, EndPs),
+    Resp0 =
+        Service#{id => Id,
+                 type => ~"io.nats.micro.v1.info_response",
+                 metadata =>
+                     maps:merge(
+                       #{'_nats.client.created.library' => ~"natserl",
+                         '_nats.client.created.version' =>
+                             iolist_to_binary(VSN)},
+                       maps:get(metadata, Service, #{})),
+                 endpoints => Endpoints},
+    Response = maps:with([name, id, version, metadata,
+                          type, description, endpoints], Resp0),
+    ?LOG(debug, "SvcRespPayload: ~p", [Response]),
+    nats_msg:pub(ReplyTo, undefined, json:encode(Response)).
+
+service_stats_msg(ReplyTo, #svc{id = Id, service = Service, endpoints = EndPs,
+                                started = Started}) ->
+    {ok, VSN} = application:get_key(nats, vsn),
+    Endpoints =
+        lists:map(
+          fun(#endpoint{endpoint = #{name := Name} = EndP}) ->
+                  EndpInfo =
+                      maps:with(
+                        [name, subject, queue_group],
+                        EndP#{subject => <<Id/binary, $., Name/binary>>}),
+                  EndpStats =
+                      #{
+                        num_requests => 0,
+                        num_errors => 0,
+                        last_error => ~"",
+                        processing_time => 0,
+                        average_processing_time => 0,
+                        data => #{total_payload => 0}},
+                  maps:merge(EndpInfo, EndpStats)
+          end, EndPs),
+    Resp0 =
+        Service#{id => Id,
+                 type => ~"io.nats.micro.v1.stats_response",
+                 started => iolist_to_binary(
+                              calendar:system_time_to_rfc3339(Started, [{offset, "Z"}])),
+                 metadata =>
+                     maps:merge(
+                       #{'_nats.client.created.library' => ~"natserl",
+                         '_nats.client.created.version' =>
+                             iolist_to_binary(VSN)},
+                       maps:get(metadata, Service, #{})),
+                 endpoints => Endpoints},
+    Response = maps:with([name, id, version, metadata,
+                          type, description, started, endpoints], Resp0),
+    ?LOG(debug, "SvcRespPayload: ~p", [Response]),
+    nats_msg:pub(ReplyTo, undefined, json:encode(Response)).
+
+service_ping_msg(ReplyTo, #svc{id = Id, service = Service}) ->
+    {ok, VSN} = application:get_key(nats, vsn),
+    Resp0 =
+        Service#{id => Id,
+                 type => ~"io.nats.micro.v1.ping_response",
+                 metadata =>
+                     maps:merge(
+                       #{'_nats.client.created.library' => ~"natserl",
+                         '_nats.client.created.version' =>
+                             iolist_to_binary(VSN)},
+                       maps:get(metadata, Service, #{}))},
+    Response = maps:with([name, id, version, metadata,
+                          type, description], Resp0),
+    ?LOG(debug, "SvcRespPayload: ~p", [Response]),
+    nats_msg:pub(ReplyTo, undefined, json:encode(Response)).
+
+handle_nats_service_msg(#service{svc = '$srv', op = '$info', endp = '$all'},
+                        _Subject, _Payload, #{reply_to := ReplyTo}, {State, Data}) ->
+    ?LOG(debug, "NATS service message, browse services"),
+    Batch = lists:map(fun(X) -> service_info_msg(ReplyTo, X) end, get_svcs(Data)),
+    continue_enqueue_batch(Batch, State, Data);
+
+handle_nats_service_msg(#service{svc = SvcName, op = '$info', endp = '$service'},
+                        _Subject, _Payload, #{reply_to := ReplyTo}, {State, Data}) ->
+    ?LOG(debug, "NATS service message, get service ~p", [SvcName]),
+    Batch = lists:map(fun(X) -> service_info_msg(ReplyTo, X) end, get_svcs(SvcName, Data)),
+    continue_enqueue_batch(Batch, State, Data);
+
+handle_nats_service_msg(#service{svc = SvcName, op = '$info', endp = Id},
+                        _Subject, _Payload, #{reply_to := ReplyTo}, {State, Data}) ->
+    ?LOG(debug, "NATS service message, get service instance ~p / ~p", [SvcName, Id]),
+    Batch = lists:map(fun(X) -> service_info_msg(ReplyTo, X) end, get_svc(SvcName, Id, Data)),
+    continue_enqueue_batch(Batch, State, Data);
+
+handle_nats_service_msg(#service{svc = '$srv', op = '$stats', endp = '$all'},
+                        _Subject, _Payload, #{reply_to := ReplyTo}, {State, Data}) ->
+    ?LOG(debug, "NATS service message, browse stats"),
+    Batch = lists:map(fun(X) -> service_stats_msg(ReplyTo, X) end, get_svcs(Data)),
+    continue_enqueue_batch(Batch, State, Data);
+
+handle_nats_service_msg(#service{svc = SvcName, op = '$stats', endp = '$service'},
+                        _Subject, _Payload, #{reply_to := ReplyTo}, {State, Data}) ->
+    ?LOG(debug, "NATS service message, get stats ~p", [SvcName]),
+    Batch = lists:map(fun(X) -> service_stats_msg(ReplyTo, X) end, get_svcs(SvcName, Data)),
+    continue_enqueue_batch(Batch, State, Data);
+
+handle_nats_service_msg(#service{svc = SvcName, op = '$stats', endp = Id},
+                        _Subject, _Payload, #{reply_to := ReplyTo}, {State, Data}) ->
+    ?LOG(debug, "NATS service message, get stats instance ~p / ~p", [SvcName, Id]),
+    Batch = lists:map(fun(X) -> service_stats_msg(ReplyTo, X) end, get_svc(SvcName, Id, Data)),
+    continue_enqueue_batch(Batch, State, Data);
+
+handle_nats_service_msg(#service{svc = '$srv', op = '$ping', endp = '$all'},
+                        _Subject, _Payload, #{reply_to := ReplyTo}, {State, Data}) ->
+    ?LOG(debug, "NATS service message, wildcard ping"),
+    Batch = lists:map(fun(X) -> service_ping_msg(ReplyTo, X) end, get_svcs(Data)),
+    continue_enqueue_batch(Batch, State, Data);
+
+handle_nats_service_msg(#service{svc = SvcName, op = '$ping', endp = '$service'},
+                        _Subject, _Payload, #{reply_to := ReplyTo}, {State, Data}) ->
+    ?LOG(debug, "NATS service message, get ping ~p", [SvcName]),
+    Batch = lists:map(fun(X) -> service_ping_msg(ReplyTo, X) end, get_svcs(SvcName, Data)),
+    continue_enqueue_batch(Batch, State, Data);
+
+handle_nats_service_msg(#service{svc = SvcName, op = '$ping', endp = Id},
+                        _Subject, _Payload, #{reply_to := ReplyTo}, {State, Data}) ->
+    ?LOG(debug, "NATS service message, get ping instance ~p / ~p", [SvcName, Id]),
+    Batch = lists:map(fun(X) -> service_ping_msg(ReplyTo, X) end, get_svc(SvcName, Id, Data)),
+    continue_enqueue_batch(Batch, State, Data);
+
+handle_nats_service_msg(#service{svc = SvcName, op = Op,
+                                 endp = #endpoint{function = F, id = Id}},
+                        Subject, Payload, Opts, {State, Data} = DecState) ->
+    ?LOG(debug, "~s:~s service request, ~p, subject: ~p, payload: ~p, opts: ~p",
+         [SvcName, Op, Id, Subject, Payload, Opts]),
+
+    case get_svc(SvcName, Id, Data) of
+        [#svc{module = M, state = CbState} = Svc] ->
+            ?LOG(debug, "Svc: ~p", [Svc]),
+            try M:F(SvcName, Op, Payload, Opts, CbState) of
+                {reply, Reply, CbStateNew} ->
+                    put_svc(SvcName, Id, Svc#svc{state = CbStateNew}, Data),
+                    case Opts of
+                        #{reply_to := ReplyTo} ->
+                            ReplyMsg = nats_msg:pub(ReplyTo, undefined, Reply),
+                            continue_enqueue_batch([ReplyMsg], State, Data);
+                        _ ->
+                            {continue, DecState}
+                    end;
+                {reply, Header, Reply, CbStateNew} ->
+                    put_svc(SvcName, Id, Svc#svc{state = CbStateNew}, Data),
+                    case Opts of
+                        #{reply_to := ReplyTo} ->
+                            ReplyMsg = nats_msg:hpub(ReplyTo, undefined, Header, Reply),
+                            continue_enqueue_batch([ReplyMsg], State, Data);
+                        _ ->
+                            {continue, DecState}
+                    end;
+                {batch, Batch, CbStateNew} ->
+                    put_svc(SvcName, Id, Svc#svc{state = CbStateNew}, Data),
+                    continue_enqueue_batch([Batch], State, Data);
+                {noreply, CbStateNew} ->
+                    put_svc(SvcName, Id, Svc#svc{state = CbStateNew}, Data),
+                    {continue, {State, Data}};
+                Other ->
+                    ?LOG(debug, "Unexpected return from Svc: ~p", [Other]),
+                    {continue, DecState}
+            catch
+                C:E:St ->
+                    ?LOG(debug, "service handler ~s:~s crashed with ~p:~p~nStacktrace ~p",
+                         [M, F, C, E, St]),
+                    {continue, DecState}
+            end;
+        _Other ->
+            ?LOG(debug, "Unexpected service request: ~p", [_Other]),
+            {continue, DecState}
+    end;
+
+handle_nats_service_msg(_Service, Subject, Payload, Opts, DecState) ->
+    ?LOG(debug, "unexpected service request, subject: ~p, payload: ~p, opts: ~p",
+         [Subject, Payload, Opts]),
+    {continue, DecState}.
 
 handle_nats_info(Payload, Data0) ->
     try json:decode(Payload, ok, #{object_push => fun json_object_push/3}) of
@@ -592,6 +886,21 @@ send(Bin, #{socket := Socket, tls := false}) ->
 send(Bin, #{socket := Socket, tls := true}) ->
     ssl:send(Socket, Bin).
 
+continue_enqueue_batch([Msg|More],
+                       #ready{pending = undefined} = State, #{verbose := true} = Data) ->
+    {continue, {State#ready{pending = ok}, enqueue_msg(Msg, Data#{send_q := More})}};
+continue_enqueue_batch(Batch, State, Data) ->
+    {continue, {State, enqueue_msg(Batch, Data)}}.
+
+next_state_enqueue_batch([Msg|More], Action,
+                         #ready{pending = undefined} = State, #{verbose := true} = Data) ->
+    {next_state, State#ready{pending = Action}, enqueue_msg(Msg, Data#{send_q := More})};
+next_state_enqueue_batch(Batch, Action, State, Data) ->
+    {next_state, State, enqueue_msg(Batch, Data), [Action]}.
+
+enqueue_msg_no_check(Msg, #{verbose := true, batch := Batch} = Data) ->
+    send([Batch, Msg], Data),
+    stop_batch_timer(Data#{batch := <<>>});
 enqueue_msg_no_check(Msg, #{batch := Batch, batch_size := BSz} = Data) ->
     Data#{batch := [Batch, Msg],
           batch_size := BSz + iolist_size(Msg)}.
@@ -652,8 +961,9 @@ close_socket(#{socket := Socket, tls := TLS} = Data) ->
           send_select := undefined
          }.
 
-make_sub_id(#{sid := Sid} = Data) ->
-    {integer_to_binary(Sid), {'$sid', Sid}, Data#{sid := Sid + 1}}.
+make_sub_id(#{tid := Tid}) ->
+    Sid = ets:update_counter(Tid, '$sid', 1, {'$sid', 0}),
+    {integer_to_binary(Sid), {'$sid', Sid}}.
 
 monitor_sub_pid(NotifyPid, #{tid := Tid}) ->
     PKey = #pid{pid = NotifyPid},
@@ -717,12 +1027,32 @@ put_sid_session(Sid, Pid, MaxMsgs, #{tid := Tid}) ->
 put_sid_inbox(Sid, #{tid := Tid}) ->
     true = ets:insert(Tid, {Sid, #inbox{}}).
 
+put_sid_service(Sid, #service{} = Svc, #{tid := Tid}) ->
+    true = ets:insert(Tid, {Sid, Svc}).
+
 get_sid({'$sid', _} = Sid, #{tid := Tid}) ->
     Ms = [{{Sid, '$1'}, [], ['$1']}],
     ets:select(Tid, Ms).
 
 del_sid({'$sid', _} = Sid, #{tid := Tid}) ->
     true = ets:delete(Tid, Sid).
+
+get_svcs(#{tid := Tid}) ->
+    %% Ms = ets:fun2ms(fun({#svc_id{}, X}) -> X end),
+    Ms = [{{#svc_id{_ = '_'}, '$1'}, [], ['$1']}],
+    ets:select(Tid, Ms).
+
+get_svcs(SvcName, #{tid := Tid}) ->
+    Ms = [{{#svc_id{name = SvcName, _ = '_'}, '$1'}, [], ['$1']}],
+    ets:select(Tid, Ms).
+
+get_svc(SvcName, Id, #{tid := Tid}) ->
+    Ms = [{{#svc_id{name = SvcName, id = Id}, '$1'}, [], ['$1']}],
+    ets:select(Tid, Ms).
+
+put_svc(SvcName, Id, #svc{} = Svc, #{tid := Tid}) ->
+    true = ets:insert(Tid, {#svc_id{name = SvcName, id = Id}, Svc}).
+
 
 %%%===================================================================
 %%% Internal functions
@@ -794,15 +1124,16 @@ init_data(Host, Port, Opts) ->
              server_info => undefined,
 
              recv_buffer => <<>>,
+             send_q => undefined,
 
              batch => [],
              batch_size => 0,
              batch_timer => undefined,
 
-             sid => 1,
              tid => ets:new(?MODULE, [private, set]),
 
              inbox => undefined,
+             srv_init => false,
 
              host => Host,
              port => Port},

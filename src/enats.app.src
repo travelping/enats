@@ -1,10 +1,11 @@
-{application, nats,
- [{description, "An OTP library"},
-  {vsn, "0.1.0"},
+{application, enats,
+ [{description, "Erlang NATS.io client library"},
+  {vsn, semver},
   {registered, []},
   {applications,
    [kernel,
-    stdlib
+    stdlib,
+    enats_msg
    ]},
   {env,[]},
   {modules, []},

@@ -42,7 +42,7 @@ all() ->
      micro_verbose_ok].
 
 init_per_suite(Config) ->
-    application:ensure_started(nats),
+    application:ensure_started(enats),
     Config.
 
 end_per_suite(Config) ->

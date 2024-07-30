@@ -1,1 +1,4 @@
-[].
+[{<<"enats_msg">>,
+  {git,"https://github.com/travelping/enats_msg.git",
+       {ref,"9496d36ed8031f14c0210b1b2224027155778e3b"}},
+  0}].

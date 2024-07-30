@@ -1,7 +1,7 @@
 nats
 =====
 
-An OTP library
+Erlang NATS.io client library.
 
 Build
 -----

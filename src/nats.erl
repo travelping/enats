@@ -116,15 +116,15 @@
 
 -type data() :: #{socket         := undefined | gen_tcp:socket() | ssl:socket(),
                   tls            := boolean(),
-                  server_info    := map(),
+                  server_info    := undefined | map(),
                   recv_buffer    := binary(),
                   batch          := iolist(),
                   batch_size     := non_neg_integer(),
                   batch_timer    := undefined | reference(),
 
-                  sid            := non_neg_integer(),
                   tid            := ets:tid(),
                   inbox          := undefined | binary(),
+                  srv_init       := boolean(),
 
                   %% Opts
                   parent         := pid(),
@@ -144,7 +144,8 @@
                   no_responders  := boolean(),
                   buffer_size    := non_neg_integer(),
                   max_batch_size := non_neg_integer(),
-                  send_timeout   := non_neg_integer()
+                  send_timeout   := non_neg_integer(),
+                  _              => _
                  }.
 
 -record(pid, {pid}).
@@ -163,8 +164,8 @@
 %%%===================================================================
 
 start_link(Host, Port, Opts) ->
-    logger:set_primary_config(level, debug),
-    gen_statem:start_link(?MODULE, [Host, Port, maps:merge(#{parent => self()}, Opts)], []).
+    _ = logger:set_primary_config(level, debug),
+    gen_statem:start_link(?MODULE, {Host, Port, maps:merge(#{parent => self()}, Opts)}, []).
 
 connect(Host, Port) ->
     connect(Host, Port, #{}).
@@ -247,14 +248,17 @@ endpoint(EndpDesc, Function) ->
 %%%===================================================================
 %%% gen_statem callbacks
 %%%===================================================================
+
 -define(CONNECT_TAG, '$connect').
 
 -spec callback_mode() -> gen_statem:callback_mode_result().
 callback_mode() -> [handle_event_function, state_enter].
 
--spec init(Args :: term()) ->
-          gen_statem:init_result(data()).
-init([Host, Port, Opts0]) ->
+-spec init({Host :: nats_host(),
+            Port :: inet:port_number(),
+            Opts :: opts()}) ->
+          gen_statem:init_result(connecting, data()).
+init({Host, Port, Opts0}) ->
     process_flag(trap_exit, true),
 
     nats_msg:init(),
@@ -269,13 +273,12 @@ init([Host, Port, Opts0]) ->
                    OldState :: term(),
                    State :: term(),
                    Data :: term()) ->
-          gen_statem:state_enter_result(data());
+          gen_statem:state_enter_result(term(), data());
                   (gen_statem:event_type(),
                    Msg :: term(),
                    State :: term(),
                    Data :: term()) ->
-          gen_statem:event_handler_result(data()).
-
+          gen_statem:event_handler_result(term(), data()).
 handle_event({call, From}, is_ready, State, _Data) ->
     {keep_state_and_data, [{reply, From, is_record(State, ready)}]};
 
@@ -372,7 +375,7 @@ handle_event(info, batch_timeout, State, #{batch := Batch} = Data)
     {keep_state, Data#{batch_size := 0, batch := [], batch_timer := undefined}};
 
 handle_event(info, {'DOWN', _MRef, process, Pid, normal}, _, Data) ->
-    del_pid_monitor(Pid, Data),
+    _ = del_pid_monitor(Pid, Data),
     Sids = get_pid_subs(Pid, Data),
     lists:foreach(fun(X) -> del_sid(X, Data) end, Sids),
     true = length(Sids) =:= del_pid_subs(Pid, Data),
@@ -549,12 +552,14 @@ send_msg_with_reply(From, Reply, Msg, #ready{pending = undefined}, Data) ->
     {keep_state, enqueue_msg(Msg, Data), [{reply, From, Reply}]}.
 
 socket_active(connected, connected, #{socket := Socket}) ->
-    inet:setopts(Socket, [{active,once}]);
+    _ = inet:setopts(Socket, [{active,once}]),
+    ok;
 socket_active(_, _, _) ->
     ok.
 
 notify_parent(Msg, #{parent := Parent}) when is_pid(Parent) ->
-    Parent ! {self(), Msg};
+    Parent ! {self(), Msg},
+    ok;
 notify_parent(_, _) ->
     ok.
 
@@ -609,7 +614,7 @@ handle_nats_msg({hmsg, {Subject, NatsSid, ReplyTo, Header, Payload}} = Msg,
     Opts = reply_opt(ReplyTo, #{header => Header}),
     handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, DecState);
 handle_nats_msg(Msg, DecState) ->
-    ?LOG("NATS Msg: ~p", [Msg]),
+    ?LOG(debug, "NATS Msg: ~p", [Msg]),
     {continue, DecState}.
 
 reply_opt(ReplyTo, Opts) when is_binary(ReplyTo) ->
@@ -924,7 +929,7 @@ start_batch_timer(Data) ->
     Data.
 
 stop_batch_timer(#{batch_timer := TRef} = Data) when is_reference(TRef) ->
-    erlang:cancel_timer(TRef),
+    _ = erlang:cancel_timer(TRef),
     Data#{batch_timer := undefined};
 stop_batch_timer(Data) ->
     Data.
@@ -1118,6 +1123,7 @@ make_socket_opt(reuseaddr, V, Opts) ->
 make_socket_opt(_, _, Opts) ->
     Opts.
 
+-spec init_data(Host :: nats_host(), Port :: inet:port_number(), Opts :: opts()) -> data().
 init_data(Host, Port, Opts) ->
     Data = #{socket => undefined,
              tls => false,

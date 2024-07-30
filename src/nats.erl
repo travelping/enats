@@ -47,7 +47,7 @@
               dump_subs/1]).
 
 %% gen_statem callbacks
--export([callback_mode/0, init/1, terminate/3, code_change/4]).
+-export([callback_mode/0, init/1, terminate/3, code_change/4, format_status/1]).
 -export([handle_event/4]).
 
 -define(MSG, ?MODULE).
@@ -501,6 +501,14 @@ handle_event(Event, EventContent, State, Data) ->
          [Event, EventContent, State, Data]),
     keep_state_and_data.
 
+format_status(Status) ->
+  maps:map(
+    fun(data, Data) ->
+            Data#{pass := redacted, auth_token := redacted};
+       (_, Value) ->
+            Value
+    end, Status).
+
 terminate(_Reason, _State, _Data) ->
     void.
 
@@ -583,6 +591,10 @@ handle_nats_msg(ok, {#ready{pending = {reply, From, Reply}} = State, Data}) ->
     gen_statem:reply(From, Reply),
     {continue, {State#ready{pending = undefined}, Data}};
 
+handle_nats_msg({error, _} = Error, {_, Data} = DecState) ->
+    notify_parent(Error, Data),
+    {continue, DecState};
+
 handle_nats_msg(ping, {connected, Data} = DecState) ->
     send(nats_msg:pong(), Data),
     {continue, DecState};
@@ -592,14 +604,9 @@ handle_nats_msg(ping, {State, Data0})
     Data = flush_batch(enqueue_msg_no_check(nats_msg:pong(), Data0)),
     {continue, {State, Data}};
 
-handle_nats_msg({info, Payload} = Msg, {connected, Data0}) ->
+handle_nats_msg({info, Payload} = Msg, {connected, Data}) ->
    ?LOG(debug, "NATS Info Msg: ~p", [Msg]),
-    case handle_nats_info(Payload, Data0) of
-        {ok, State, Data} ->
-            {stop, {State, Data}};
-        {error, _} ->
-            {stop, {closed, Data0}}
-    end;
+    handle_nats_info(Payload, Data);
 
 handle_nats_msg({msg, {Subject, NatsSid, ReplyTo, Payload}} = Msg, {State, _} = DecState)
   when is_record(State, ready) ->
@@ -860,20 +867,16 @@ handle_nats_info(Payload, Data0) ->
         {JSON, ok, _} ->
             maybe
                 ?LOG(debug, "NATS Info JSON: ~p", [JSON]),
-                {ok, Data} = ssl_upgrade(JSON, Data0#{server_info := JSON}),
+                {ok, Data} ?= ssl_upgrade(JSON, Data0#{server_info := JSON}),
                 ?LOG(debug, "NATS Client Info: ~p", [client_info(Data)]),
-                send(client_info(Data), Data),
-                case Data of
-                    #{verbose := true} ->
-                        {ok, #ready{pending = ok}, Data};
-                    _ ->
-                        {ok, #ready{}, Data}
-                end
+                Msg = client_info(Data),
+                continue_enqueue_batch([Msg], #ready{}, Data)
             end
     catch
-        E:C ->
-            ?LOG(debug, "NATS Info Error: ~p:~p", [E, C]),
-            {error, C}
+        C:E ->
+            ?LOG(debug, "NATS Info Error: ~p:~p", [C, E]),
+            notify_parent({error, {C, E}}, Data0),
+            {stop, {closed, Data0}}
     end.
 
 ssl_upgrade(#{tls_required := true}, #{socket := Socket} = Data) ->
@@ -962,8 +965,7 @@ close_socket(#{socket := Socket, tls := TLS} = Data) ->
     end,
     Data#{socket := undefined,
           tls := false,
-          recv_select := undefined,
-          send_select := undefined
+          server_info := undefined
          }.
 
 make_sub_id(#{tid := Tid}) ->

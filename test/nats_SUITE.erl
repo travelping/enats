@@ -17,6 +17,7 @@
 
 -module(nats_SUITE).
 
+-include_lib("stdlib/include/assert.hrl").
 -include_lib("common_test/include/ct.hrl").
 
 -compile([export_all, nowarn_export_all]).
@@ -35,7 +36,17 @@ all() ->
      pub_with_buffer_size,
      sub_ok,
      sub_verbose_ok,
-     unsub_verbose_ok].
+     unsub_verbose_ok,
+     request_no_responders,
+     micro_ok,
+     micro_verbose_ok].
+
+init_per_suite(Config) ->
+    application:ensure_started(nats),
+    Config.
+
+end_per_suite(Config) ->
+    Config.
 
 init_per_testcase(_TestCase, Config) ->
     Config.
@@ -162,11 +173,70 @@ unsub_verbose_ok(_) ->
     receive {C, ready} -> ok end,
     {ok, Sid} = nats:sub(C, <<"foo.*">>),
     nats:unsub(C, Sid),
-    ct:pal("unsub done"),
     nats:pub(C, <<"foo.bar">>, <<>>),
-    ct:pal("pub done"),
     receive
         {C, _, {msg, _, _, _}} ->
+            throw(didnt_expect_a_msg)
+    after 1000 ->
+            ok
+    end.
+
+request_no_responders(_) ->
+    Host = <<"127.0.0.1">>,
+    Port = 4222,
+    {ok, C} = nats:connect(Host, Port),
+    receive {C, ready} -> ok end,
+
+    Response = nats:request(C, ~"FOOBAR.echo", ~"Hello World", #{}),
+    ?assertEqual({error,no_responders}, Response),
+    ok.
+
+request_verbose_no_responders(_) ->
+    Host = <<"127.0.0.1">>,
+    Port = 4222,
+    {ok, C} = nats:connect(Host, Port),
+    receive {C, ready} -> ok end,
+
+    Response = nats:request(C, ~"FOOBAR.echo", ~"Hello World", #{}),
+    ?assertEqual({error,no_responders}, Response),
+    ok.
+micro_ok(_) ->
+    Host = <<"127.0.0.1">>,
+    Port = 4222,
+    {ok, C} = nats:connect(Host, Port),
+    receive {C, ready} -> ok end,
+
+    Svc = nats:service(#{name => ~"FOOBAR", version => ~"2.0.0"},
+                       [nats:endpoint(#{name => ~"echo"}, echo)], ?MODULE, []),
+    ok = nats:serve(C, Svc),
+
+    Response = nats:request(C, ~"FOOBAR.echo", ~"Hello World", #{}),
+    ?assertEqual({ok,{<<"Hello World">>, #{}}}, Response),
+
+    receive
+        Msg ->
+            ct:pal("Unexpected Msg: ~p", [Msg]),
+            throw(didnt_expect_a_msg)
+    after 1000 ->
+            ok
+    end.
+
+micro_verbose_ok(_) ->
+    Host = <<"127.0.0.1">>,
+    Port = 4222,
+    {ok, C} = nats:connect(Host, Port, #{verbose => true}),
+    receive {C, ready} -> ok end,
+
+    Svc = nats:service(#{name => ~"FOOBAR", version => ~"2.0.0"},
+                       [nats:endpoint(#{name => ~"echo"}, echo)], ?MODULE, []),
+    ok = nats:serve(C, Svc),
+
+    Response = nats:request(C, ~"FOOBAR.echo", ~"Hello World", #{}),
+    ?assertEqual({ok,{<<"Hello World">>, #{}}}, Response),
+
+    receive
+        Msg ->
+            ct:pal("Unexpected Msg: ~p", [Msg]),
             throw(didnt_expect_a_msg)
     after 1000 ->
             ok
@@ -177,3 +247,10 @@ send_tcp_msg(BinHost, Port, BinMsg) ->
     {ok, Socket} = gen_tcp:connect(Host, Port, [binary, {packet, 0}]),
     ok = gen_tcp:send(Socket, BinMsg),
     ok = gen_tcp:close(Socket).
+
+%%%===================================================================
+%%% Echo Server Callback
+%%%===================================================================
+
+echo(_SvcName, _Op, Payload, _, CbState) ->
+    {reply, Payload, CbState}.

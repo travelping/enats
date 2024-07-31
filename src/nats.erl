@@ -28,10 +28,14 @@
          unsub/3,
          disconnect/1,
          is_ready/1,
-         request/4,
-         serve/2
+         request/4
         ]).
--export([service/4, endpoint/2]).
+
+%% internal API
+-export([serve/2,
+         service_reply/2,
+         service_reply/3,
+         service/4, endpoint/2]).
 
 %% debug functions
 -export([dump_subs/1]).
@@ -51,7 +55,6 @@
 -export([handle_event/4]).
 
 -define(MSG, ?MODULE).
--define(VERSION, <<"0.4.1">>).
 -define(DEFAULT_SEND_TIMEOUT, 1).
 -define(DEFAULT_MAX_BATCH_SIZE, 100).
 -define(CONNECT_TIMEOUT, 1000).
@@ -65,7 +68,7 @@
           pass => undefined,
           name => <<"nats">>,
           lang => <<"Erlang">>,
-          version => ?VERSION,
+          version => undefined,
           headers => true,
           no_responders => true,
           buffer_size => 0,
@@ -148,6 +151,11 @@
                   _              => _
                  }.
 
+-record(nats_req, {conn     :: pid(),
+                   svc      :: binary(),
+                   id       :: binary(),
+                   reply_to :: undefined | binary()
+                  }).
 -record(pid, {pid}).
 -record(sub, {pid, sid}).
 -record(sub_session, {pid, max_msgs}).
@@ -164,7 +172,6 @@
 %%%===================================================================
 
 start_link(Host, Port, Opts) ->
-    _ = logger:set_primary_config(level, debug),
     gen_statem:start_link(?MODULE, {Host, Port, maps:merge(#{parent => self()}, Opts)}, []).
 
 connect(Host, Port) ->
@@ -209,16 +216,35 @@ unsub(Server, SRef, Opts) ->
 request(Server, Subject, Payload, Opts) ->
     maybe
         {ok, Inbox} ?= gen_statem:call(Server, get_inbox_topic),
-        case gen_statem:call(Server, {request, Subject, Inbox, Payload, Opts}) of
+        try gen_statem:call(Server, {request, Subject, Inbox, Payload, Opts}) of
             {ok, {_, #{header := <<"NATS/1.0 503\r\n", _/binary>>}}} ->
-                    {error, no_responders};
+                {error, no_responders};
             Reply ->
                 Reply
+        catch
+            exit:{timeout, _} ->
+                {error, timeout};
+            exit:{_, _} ->
+                {error, no_responders}
         end
     end.
 
 serve(Server, Service) ->
     gen_statem:call(Server, {serve, Service}).
+
+service_reply(#nats_req{reply_to = undefined}, _Payload) ->
+    ok;
+service_reply(#nats_req{conn = Server, reply_to = ReplyTo} = ReplyKey, Payload) ->
+    Msg = nats_msg:pub(ReplyTo, undefined, Payload),
+    (catch gen_statem:call(Server, {service_reply, ReplyKey, Msg})),
+    ok.
+
+service_reply(#nats_req{reply_to = undefined}, _Header, _Payload) ->
+    ok;
+service_reply(#nats_req{conn = Server, reply_to = ReplyTo} = ReplyKey, Header, Payload) ->
+    Msg = nats_msg:hpub(ReplyTo, undefined, Header, Payload),
+    (catch gen_statem:call(Server, {service_reply, ReplyKey, Msg})),
+    ok.
 
 disconnect(Server) ->
     gen_statem:call(Server, disconnect).
@@ -263,7 +289,8 @@ init({Host, Port, Opts0}) ->
 
     nats_msg:init(),
 
-    Opts = maps:merge(?DEFAULT_OPTS, Opts0),
+    DefaultOpts = ?DEFAULT_OPTS,
+    Opts = maps:merge(DefaultOpts#{version := lib_version()}, Opts0),
     ?LOG(debug, "SocketOpts: ~p", [socket_opts(Opts)]),
 
     Data = init_data(Host, Port, Opts),
@@ -493,6 +520,17 @@ handle_event({call, From},
     Action = {reply, From, ok},
     next_state_enqueue_batch(Subs, Action, State, Data);
 
+handle_event({call, From},
+             {service_reply, #nats_req{svc = SvcName, id = Id}, Msg},
+             State, Data) ->
+    case get_svc(SvcName, Id, Data) of
+        [#svc{} = _Svc] ->
+            Action = {reply, From, ok},
+            next_state_enqueue_batch([Msg], Action, State, Data);
+        [] ->
+            {keep_state_and_data, [{reply, From, {error, not_found}}]}
+    end;
+
 handle_event({call, From}, dump_subs, _State, #{tid := Tid}) ->
     {keep_state_and_data, [{reply, From, ets:tab2list(Tid)}]};
 
@@ -679,7 +717,6 @@ handle_nats_inbox_msg(Subject, Payload, Opts, {_, #{inbox := Inbox} = Data} = De
     {continue, DecState}.
 
 service_info_msg(ReplyTo, #svc{id = Id, service = Service, endpoints = EndPs}) ->
-    {ok, VSN} = application:get_key(nats, vsn),
     Endpoints =
         lists:map(
           fun(#endpoint{endpoint = #{name := Name} = EndP}) ->
@@ -693,8 +730,7 @@ service_info_msg(ReplyTo, #svc{id = Id, service = Service, endpoints = EndPs}) -
                  metadata =>
                      maps:merge(
                        #{'_nats.client.created.library' => ~"natserl",
-                         '_nats.client.created.version' =>
-                             iolist_to_binary(VSN)},
+                         '_nats.client.created.version' => lib_version()},
                        maps:get(metadata, Service, #{})),
                  endpoints => Endpoints},
     Response = maps:with([name, id, version, metadata,
@@ -704,7 +740,6 @@ service_info_msg(ReplyTo, #svc{id = Id, service = Service, endpoints = EndPs}) -
 
 service_stats_msg(ReplyTo, #svc{id = Id, service = Service, endpoints = EndPs,
                                 started = Started}) ->
-    {ok, VSN} = application:get_key(nats, vsn),
     Endpoints =
         lists:map(
           fun(#endpoint{endpoint = #{name := Name} = EndP}) ->
@@ -730,8 +765,7 @@ service_stats_msg(ReplyTo, #svc{id = Id, service = Service, endpoints = EndPs,
                  metadata =>
                      maps:merge(
                        #{'_nats.client.created.library' => ~"natserl",
-                         '_nats.client.created.version' =>
-                             iolist_to_binary(VSN)},
+                         '_nats.client.created.version' => lib_version()},
                        maps:get(metadata, Service, #{})),
                  endpoints => Endpoints},
     Response = maps:with([name, id, version, metadata,
@@ -740,15 +774,13 @@ service_stats_msg(ReplyTo, #svc{id = Id, service = Service, endpoints = EndPs,
     nats_msg:pub(ReplyTo, undefined, json:encode(Response)).
 
 service_ping_msg(ReplyTo, #svc{id = Id, service = Service}) ->
-    {ok, VSN} = application:get_key(nats, vsn),
     Resp0 =
         Service#{id => Id,
                  type => ~"io.nats.micro.v1.ping_response",
                  metadata =>
                      maps:merge(
                        #{'_nats.client.created.library' => ~"natserl",
-                         '_nats.client.created.version' =>
-                             iolist_to_binary(VSN)},
+                         '_nats.client.created.version' => lib_version()},
                        maps:get(metadata, Service, #{}))},
     Response = maps:with([name, id, version, metadata,
                           type, description], Resp0),
@@ -818,7 +850,9 @@ handle_nats_service_msg(#service{svc = SvcName, op = Op,
     case get_svc(SvcName, Id, Data) of
         [#svc{module = M, state = CbState} = Svc] ->
             ?LOG(debug, "Svc: ~p", [Svc]),
-            try M:F(SvcName, Op, Payload, Opts, CbState) of
+            ReplyKey = #nats_req{conn = self(), svc = SvcName, id = Id,
+                                 reply_to = maps:get(reply_to, Opts, undefined)},
+            try M:F(ReplyKey, SvcName, Op, Payload, Opts, CbState) of
                 {reply, Reply, CbStateNew} ->
                     put_svc(SvcName, Id, Svc#svc{state = CbStateNew}, Data),
                     case Opts of
@@ -1124,6 +1158,10 @@ make_socket_opt(reuseaddr, V, Opts) ->
     [{reuseaddr, V} | Opts];
 make_socket_opt(_, _, Opts) ->
     Opts.
+
+lib_version() ->
+    {ok, VSN} = application:get_key(enats, vsn),
+    iolist_to_binary(VSN).
 
 -spec init_data(Host :: nats_host(), Port :: inet:port_number(), Opts :: opts()) -> data().
 init_data(Host, Port, Opts) ->

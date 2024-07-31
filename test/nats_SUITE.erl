@@ -42,6 +42,7 @@ all() ->
      micro_verbose_ok].
 
 init_per_suite(Config) ->
+    _ = logger:set_primary_config(level, debug),
     application:ensure_started(enats),
     Config.
 
@@ -206,9 +207,13 @@ micro_ok(_) ->
     {ok, C} = nats:connect(Host, Port),
     receive {C, ready} -> ok end,
 
-    Svc = nats:service(#{name => ~"FOOBAR", version => ~"2.0.0"},
-                       [nats:endpoint(#{name => ~"echo"}, echo)], ?MODULE, []),
-    ok = nats:serve(C, Svc),
+    Svc = #{name => ~"FOOBAR",
+            version => ~"2.0.0",
+            module => ?MODULE,
+            state => [],
+            endpoints =>
+                [#{name => ~"echo", function => echo}]},
+    ok = nats_service:serve(C, Svc),
 
     Response = nats:request(C, ~"FOOBAR.echo", ~"Hello World", #{}),
     ?assertEqual({ok,{<<"Hello World">>, #{}}}, Response),
@@ -227,9 +232,13 @@ micro_verbose_ok(_) ->
     {ok, C} = nats:connect(Host, Port, #{verbose => true}),
     receive {C, ready} -> ok end,
 
-    Svc = nats:service(#{name => ~"FOOBAR", version => ~"2.0.0"},
-                       [nats:endpoint(#{name => ~"echo"}, echo)], ?MODULE, []),
-    ok = nats:serve(C, Svc),
+    Svc = #{name => ~"FOOBAR",
+            version => ~"2.0.0",
+            module => ?MODULE,
+            state => [],
+            endpoints =>
+                [#{name => ~"echo", function => echo}]},
+    ok = nats_service:serve(C, Svc),
 
     Response = nats:request(C, ~"FOOBAR.echo", ~"Hello World", #{}),
     ?assertEqual({ok,{<<"Hello World">>, #{}}}, Response),
@@ -252,5 +261,5 @@ send_tcp_msg(BinHost, Port, BinMsg) ->
 %%% Echo Server Callback
 %%%===================================================================
 
-echo(_SvcName, _Op, Payload, _, CbState) ->
+echo(_ReplyKey, _SvcName, _Op, Payload, _, CbState) ->
     {reply, Payload, CbState}.

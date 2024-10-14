@@ -18,8 +18,9 @@
 
 %% API
 -export([connect/2,
-         connect/3]).
--export([pub/2,
+         connect/3,
+         flush/1,
+         pub/2,
          pub/3,
          pub/4,
          sub/2,
@@ -36,11 +37,13 @@
          service_reply/2,
          service_reply/3,
          service/4, endpoint/2]).
+-export([rnd_topic_id/0]).
 
 %% debug functions
 -export([dump_subs/1]).
 
 -ignore_xref([connect/2, connect/3,
+              flush/2,
               pub/2, pub/3, pub/4,
               sub/2, sub/3,
               unsub/2, unsub/3,
@@ -186,6 +189,9 @@ connect(Host, Port) ->
 
 connect(Host, Port, Opts) ->
     start_link(Host, Port, Opts).
+
+flush(Server) ->
+    gen_statem:call(Server, flush).
 
 pub(Server, Subject) ->
     pub(Server, Subject, <<>>, #{}).
@@ -417,6 +423,10 @@ handle_event({call, _From}, _, #ready{pending = Pending}, _Data)
 handle_event({call, From}, _, State, _Data)
   when not is_record(State, ready) ->
     {keep_state_and_data, [{reply, From, {error, not_ready}}]};
+
+handle_event({call, From}, flush, _State, #{batch := Batch} = Data) ->
+    send(Batch, Data),
+    {keep_state, Data#{batch_size := 0, batch := [], batch_timer := undefined}, [{reply, From, ok}]};
 
 handle_event({call, From}, {pub, Subject, Payload, Opts}, State, Data) ->
     Msg = mk_pub_msg(Subject, Payload, Opts),

@@ -31,6 +31,7 @@
 -module(nats_service).
 
 -export([serve/2, reply/2, reply/3]).
+-ignore_xref([serve/2, reply/2, reply/3]).
 
 %%%===================================================================
 %%% API

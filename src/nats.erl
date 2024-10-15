@@ -550,12 +550,12 @@ handle_event(Event, EventContent, State, Data) ->
     keep_state_and_data.
 
 format_status(Status) ->
-  maps:map(
-    fun(data, Data) ->
-            Data#{pass := redacted, auth_token := redacted};
-       (_, Value) ->
-            Value
-    end, Status).
+    maps:map(
+      fun(data, Data) ->
+              Data#{pass := redacted, auth_token := redacted};
+         (_, Value) ->
+              Value
+      end, Status).
 
 terminate(_Reason, _State, _Data) ->
     void.
@@ -653,7 +653,7 @@ handle_nats_msg(ping, {State, Data0})
     {continue, {State, Data}};
 
 handle_nats_msg({info, Payload} = Msg, {connected, Data}) ->
-   ?LOG(debug, "NATS Info Msg: ~p", [Msg]),
+    ?LOG(debug, "NATS Info Msg: ~p", [Msg]),
     handle_nats_info(Payload, Data);
 
 handle_nats_msg({msg, {Subject, NatsSid, ReplyTo, Payload}} = Msg, {State, _} = DecState)

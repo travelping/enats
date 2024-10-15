@@ -28,9 +28,12 @@
 -define(PULL_CONSUMER, ~"CT-PUSH").
 -define(PUSH_SUBJECT, ~"CT-PUSH-SUBJECT").
 -define(PULL_HANDLER, nats_js_pull_consumer).
+-define(KV_BUCKET, ~"TEST_KV").
+-define(KV_KEY_1, ~"FOO-1").
+-define(KV_KEY_2, ~"FOO-2").
 
 all() ->
-    [jetstream].
+    [jetstream, kv].
 
 init_per_suite(Config) ->
     _ = logger:set_primary_config(level, debug),
@@ -55,6 +58,7 @@ end_per_testcase(_TestCase, Config) ->
         nats_consumer:delete(Con, ?STREAM, ?PUSH_CONSUMER),
         nats_consumer:delete(Con, ?STREAM, ?PULL_CONSUMER),
         nats_stream:delete(Con, ?STREAM),
+        nats_kv:delete_bucket(Con, ?KV_BUCKET),
         ok
     catch C:E ->
             ct:pal("end_per_testcase: ~0p:~0p", [C, E])
@@ -157,6 +161,102 @@ jetstream(Client, Con, _Config) ->
     nats_pull_consumer:stop(Pull1Srv),
 
     ok.
+
+kv(Config) ->
+    Client = connect(),
+    Con = connect(),
+
+    try
+        kv(Client, Con, Config)
+    after
+        nats:disconnect(Con),
+        nats:disconnect(Client)
+    end,
+    ok.
+
+kv(_Client, Con, _Config) ->
+    BucketCreateR1 = nats_kv:create_bucket(Con, ?KV_BUCKET),
+    ct:pal("R1: ~p", [BucketCreateR1]),
+    ?assertMatch(#{type := ?JS_API_V1_STREAM_CREATE_RESPONSE, config := _}, BucketCreateR1),
+    ?assertNot(is_map_key(error, BucketCreateR1)),
+    #{config := BucketCfg} = BucketCreateR1,
+
+    BucketCreateR2 = nats_kv:create_bucket(Con, ?KV_BUCKET, #{ttl => 1_000_000_000}, #{}),
+    ct:pal("R2: ~p", [BucketCreateR2]),
+    ?assertMatch(#{type := ?JS_API_V1_STREAM_CREATE_RESPONSE, error := _}, BucketCreateR2),
+
+    BucketUpdateR1 = nats_kv:update_bucket(Con, ?KV_BUCKET, #{ttl => 60 * 1_000_000_000}, #{}),
+    ct:pal("R1: ~p", [BucketUpdateR1]),
+    ?assertMatch(#{type := ?JS_API_V1_STREAM_UPDATE_RESPONSE, config := _}, BucketUpdateR1),
+    ?assertNot(is_map_key(error, BucketUpdateR1)),
+    #{config := NewBucketCfg} = BucketUpdateR1,
+    ?assertNotEqual(BucketCfg, NewBucketCfg),
+
+    ?assertMatch(#{stream := _, seq := _}, nats_kv:put(Con, ?KV_BUCKET, ?KV_KEY_1, ~"BAR")),
+
+    KvGetR1 = nats_kv:get(Con, ?KV_BUCKET, ?KV_KEY_1),
+    ct:pal("KvGetR1: ~p", [KvGetR1]),
+    ?assertMatch(#{type := ?JS_API_V1_STREAM_MSG_GET_RESPONSE,
+                   message := #{data := _}}, KvGetR1),
+    ?assertNot(is_map_key(error, KvGetR1)),
+
+    #{message := #{data := Data1}} = KvGetR1,
+    ct:pal("Data1: ~p", [Data1]),
+
+    KvGetR2 = nats_kv:get(Con, ?KV_BUCKET, ?KV_KEY_1, BucketCfg),
+    ct:pal("KvGetR2: ~p", [KvGetR2]),
+    ?assertMatch(#{type := ?JS_API_V1_STREAM_MSG_GET_RESPONSE,
+                   message := #{data := _}}, KvGetR2),
+    ?assertNot(is_map_key(error, KvGetR2)),
+
+    #{message := #{data := Data2}} = KvGetR2,
+    ct:pal("Data2: ~p", [Data2]),
+
+    KvDeleteR1 = nats_kv:delete(Con, ?KV_BUCKET, ?KV_KEY_2),
+    ct:pal("KvDeleteR1: ~p", [KvDeleteR1]),
+    ?assertMatch(#{stream := _, seq := _}, KvDeleteR1),
+    ?assertNot(is_map_key(error, KvDeleteR1)),
+
+    KvCreateR1 = nats_kv:create(Con, ?KV_BUCKET, ?KV_KEY_2, ~"BOO"),
+    ct:pal("KvCreateR1: ~p", [KvCreateR1]),
+    ?assertMatch(#{stream := _, seq := _}, KvCreateR1),
+
+    KvCreateR2 = nats_kv:create(Con, ?KV_BUCKET, ?KV_KEY_2, ~"BOO-1"),
+    ct:pal("KvCreateR2: ~p", [KvCreateR2]),
+    ?assertMatch({error, exists}, KvCreateR2),
+
+    KvPurgeR1 = nats_kv:purge(Con, ?KV_BUCKET, ?KV_KEY_2),
+    ct:pal("KvPurgeR1: ~p", [KvPurgeR1]),
+    ?assertMatch(#{stream := _, seq := _}, KvPurgeR1),
+    ?assertNot(is_map_key(error, KvPurgeR1)),
+
+    KvCreateR3 = nats_kv:create(Con, ?KV_BUCKET, ?KV_KEY_2, ~"BOO"),
+    ct:pal("KvCreateR3: ~p", [KvCreateR3]),
+    ?assertMatch(#{stream := _, seq := _}, KvCreateR3),
+    ?assertNot(is_map_key(error, KvCreateR3)),
+
+    SeqNoR3 = maps:get(seq, KvCreateR3),
+    KvUpdateR1 = nats_kv:update(Con, ?KV_BUCKET, ?KV_KEY_2, ~"BOO-2", SeqNoR3 + 100),
+    ct:pal("KvUpdateR1: ~p", [KvUpdateR1]),
+    ?assertMatch(#{error := _}, KvUpdateR1),
+
+    KvUpdateR2 = nats_kv:update(Con, ?KV_BUCKET, ?KV_KEY_2, ~"BOO-2", SeqNoR3),
+    ct:pal("KvUpdateR2: ~p", [KvUpdateR2]),
+    ?assertMatch(#{stream := _, seq := _}, KvUpdateR2),
+    ?assertNot(is_map_key(error, KvUpdateR2)),
+
+    KvPurgeR2 = nats_kv:purge(Con, ?KV_BUCKET, ?KV_KEY_2),
+    ct:pal("KvPurgeR2: ~p", [KvPurgeR2]),
+    ?assertMatch(#{stream := _, seq := _}, KvPurgeR2),
+    ?assertNot(is_map_key(error, KvPurgeR2)),
+
+    BucketDeleteR1 = nats_kv:delete_bucket(Con, ?KV_BUCKET),
+    ct:pal("R1: ~p", [BucketDeleteR1]),
+    ?assertMatch(#{type := ?JS_API_V1_STREAM_DELETE_RESPONSE, success := true}, BucketDeleteR1),
+    ?assertNot(is_map_key(error, BucketDeleteR1)),
+
+    ok.
+
 
 %%%===================================================================
 %%% Internal helpers

@@ -131,7 +131,7 @@ handle_info({Conn, Sid, {msg, Subject, Message, Opts}},
             #state{module = Module, modstate = ModStateIn, conn = Conn, sid = Sid} = State) ->
     ?LOG(info, "~s: Subject: ~0p, Message: ~0p", [Subject, Message]),
     {AckType, ModStateOut} = Module:handle_message(Subject, Message, Opts, ModStateIn),
-     nats_consumer:ack_msg(Conn, AckType, false, Opts),
+    nats_consumer:ack_msg(Conn, AckType, false, Opts),
 
     BatchOutstanding =
         case State of
@@ -142,7 +142,7 @@ handle_info({Conn, Sid, {msg, Subject, Message, Opts}},
                 BatchSize;
             #state{batch_outstanding = Outstanding} ->
                 Outstanding
-    end,
+        end,
     {noreply, State#state{modstate = ModStateOut, batch_outstanding = BatchOutstanding}};
 
 handle_info(_Info, State) ->

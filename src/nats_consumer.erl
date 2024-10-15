@@ -178,7 +178,7 @@ subscribe(Conn, Stream, Name, _Opts) ->
     end.
 
 unsubscribe(Conn, #{stream_name := _, name := _,
-                  config := #{deliver_subject := DeliverSubject}}, _Opts) ->
+                    config := #{deliver_subject := DeliverSubject}}, _Opts) ->
     nats:unsub(Conn, DeliverSubject);
 unsubscribe(_Conn, #{stream_name := _, name := _}, _Opts) ->
     {error, not_a_push_consumer}.

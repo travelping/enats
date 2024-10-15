@@ -55,7 +55,82 @@
 
 -include_lib("enats/include/nats_stream.hrl").
 
+-export_type([
+              subject_transform_config/0,
+              republish/0,
+              placement/0,
+              stream_source/0,
+              external_stream/0
+             ]).
+
+-doc """
+SubjectTransformConfig is for applying a subject transform (to matching messages) before doing anything else when a new message is received.
+""".
+-type subject_transform_config() ::
+        #{
+          src => binary(),
+          dest => binary()
+         }.
+
+-doc """
+RePublish is for republishing messages once committed to a stream. The
+original subject is remapped from the subject pattern to the destination
+pattern.
+""".
+-type republish() ::
+        #{
+          %% Source is the subject pattern to match incoming messages against.
+          src => binary(),
+
+          %% Destination is the subject pattern to republish the subject to.
+          dest => binary(),
+
+          %% HeadersOnly is a flag to indicate that only the headers should be
+          %% republished.
+          headers_only => boolean()
+         }.
+
+-doc """
+Placement is used to guide placement of streams in clustered JetStream.
+""".
+-type placement() ::
+        #{
+          %% Cluster is the name of the cluster to which the stream should be
+          %% assigned.
+          cluster := binary(),
+
+          %% Tags are used to match streams to servers in the cluster. A stream
+          %% will be assigned to a server with a matching tag.
+          tags => [binary()]
+         }.
+
+-doc """
+StreamSource dictates how streams can source from other streams.
+""".
+-type stream_source() ::
+        #{
+          name               := binary(),
+          opt_start_seq      => non_neg_integer(),
+          opt_start_time     => binary(),
+          filter_subject     => binary(),
+          subject_transforms => [subject_transform_config()],
+          external           => external_stream(),
+          domain             => binary()
+         }.
+
+-doc """
+ExternalStream allows you to qualify access to a stream source in another account.
+""".
+-type external_stream() ::
+        #{
+          api     := binary(),
+          deliver => binary()
+         }.
+
+
 -define(API_OPTS, [domain]).
+-define(MSG_GET_REQUEST_FIELDS, [seq, last_by_subj, next_by_subj, batch, max_bytes,
+                                 start_time, multi_last, up_to_seq, up_to_time]).
 
 %%%===================================================================
 %%% API
@@ -81,10 +156,12 @@ types(v1) ->
      ?JS_API_V1_STREAM_TEMPLATE_NAMES_RESPONSE,
      ?JS_API_V1_STREAM_UPDATE_RESPONSE].
 
-create(Conn, Name, Opts) ->
-    create(Conn, Name, maps:without(?API_OPTS, Opts), maps:with(?API_OPTS, Opts)).
+create(Conn, Name, Opts)
+  when is_binary(Name), is_map(Opts) ->
+    create(Conn, Name, maps:without(?API_OPTS, Opts), maps:with(?API_OPTS, Opts));
 
-create(Conn, Name, Config, Opts) ->
+create(Conn, #{name := Name} = Config, Opts)
+  when is_binary(Name), is_map(Opts) ->
     case Config of
         #{pedantic := true,
           retention := _,
@@ -107,22 +184,35 @@ create(Conn, Name, Config, Opts) ->
             Other
     end.
 
+create(Conn, Name, Config, Opts) ->
+    create(Conn, Config#{name => Name}, Opts).
+
 get(Conn, Name) ->
-    get(Conn, Name, #{}).
+    get(Conn, Name, #{}, #{}).
 
 get(Conn, Name, Opts) ->
+    get(Conn, Name, maps:without(?MSG_GET_REQUEST_FIELDS, Opts), maps:with(?API_OPTS, Opts)).
+
+get(Conn, Name, Request, Opts) ->
+    ReqBin = if map_size(Request) =:= 0 ->
+                     <<>>;
+                true ->
+                     json:encode(Request)
+             end,
     Topic = make_js_api_topic(~"INFO", Name, Opts),
-    case nats:request(Conn, Topic, <<>>, #{}) of
+    case nats:request(Conn, Topic, ReqBin, #{}) of
         {ok, {JSON, _}} ->
             decode_response(JSON);
         Other ->
             Other
     end.
 
-update(Conn, Name, Opts) ->
-    update(Conn, Name, maps:without(?API_OPTS, Opts), maps:with(?API_OPTS, Opts)).
+update(Conn, Name, Opts)
+  when is_binary(Name), is_map(Opts) ->
+    update(Conn, Name, maps:without(?API_OPTS, Opts), maps:with(?API_OPTS, Opts));
 
-update(Conn, Name, Config, Opts) ->
+update(Conn, #{name := Name} = Config, Opts)
+  when is_map(Opts) ->
     case Config of
         #{pedantic := true,
           retention := _,
@@ -144,6 +234,9 @@ update(Conn, Name, Config, Opts) ->
         Other ->
             Other
     end.
+
+update(Conn, Name, Config, Opts) ->
+    update(Conn, Config#{name => Name}, Opts).
 
 delete(Conn, Name) ->
     delete(Conn, Name, #{}).
@@ -242,7 +335,10 @@ msg_delete(Conn, Name, SeqNo, NoErase)
 msg_delete(Conn, Name, Msg, Opts)
   when is_map(Msg), is_map(Opts) ->
     Topic = make_js_api_topic(~"MSG.DELETE", Name, Opts),
-    case nats:request(Conn, Topic, json:encode(Msg), #{}) of
+    BinMsg = if map_size(Msg) =:= 0 -> <<>>;
+                true -> json:encode(Msg)
+             end,
+    case nats:request(Conn, Topic, BinMsg, #{}) of
         {ok, {JSON, _}} ->
             decode_response(JSON);
         Other ->

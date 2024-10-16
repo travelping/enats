@@ -80,9 +80,7 @@ init([Module, Conn, Stream, Name, NatsOpts]) ->
     monitor(process, Conn),
 
     maybe
-        #{type := ?JS_API_V1_CONSUMER_INFO_RESPONSE} = Config
-            ?= nats_consumer:get(Conn, Stream, Name, NatsOpts),
-
+        {ok, Config} ?= nats_consumer:get(Conn, Stream, Name, NatsOpts),
         ok ?= case Config of
                   #{config := Config} when is_map_key(deliver_subject, Config) ->
                       {error, not_a_pull_consumer};

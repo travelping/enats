@@ -178,8 +178,8 @@ create(Conn, #{name := Name} = Config, Opts)
     end,
     Topic = make_js_api_topic(~"CREATE", Name, Opts),
     case nats:request(Conn, Topic, json:encode(Config#{name => Name}), #{}) of
-        {ok, {JSON, _}} ->
-            decode_response(JSON);
+        {ok, Response} ->
+            unmarshal_response(?JS_API_V1_STREAM_CREATE_RESPONSE, Response);
         Other ->
             Other
     end.
@@ -201,8 +201,8 @@ get(Conn, Name, Request, Opts) ->
              end,
     Topic = make_js_api_topic(~"INFO", Name, Opts),
     case nats:request(Conn, Topic, ReqBin, #{}) of
-        {ok, {JSON, _}} ->
-            decode_response(JSON);
+        {ok, Response} ->
+            unmarshal_response(?JS_API_V1_STREAM_INFO_RESPONSE, Response);
         Other ->
             Other
     end.
@@ -229,8 +229,8 @@ update(Conn, #{name := Name} = Config, Opts)
     end,
     Topic = make_js_api_topic(~"UPDATE", Name, Opts),
     case nats:request(Conn, Topic, json:encode(Config#{name => Name}), #{}) of
-        {ok, {JSON, _}} ->
-            decode_response(JSON);
+        {ok, Response} ->
+            unmarshal_response(?JS_API_V1_STREAM_UPDATE_RESPONSE, Response);
         Other ->
             Other
     end.
@@ -244,8 +244,8 @@ delete(Conn, Name) ->
 delete(Conn, Name, Opts) ->
     Topic = make_js_api_topic(~"DELETE", Name, Opts),
     case nats:request(Conn, Topic, <<>>, #{}) of
-        {ok, {JSON, _}} ->
-            decode_response(JSON);
+        {ok, Response} ->
+            unmarshal_response(?JS_API_V1_STREAM_DELETE_RESPONSE, Response);
         Other ->
             Other
     end.
@@ -256,8 +256,8 @@ purge(Conn, Name) ->
 purge(Conn, Name, Opts) ->
     Topic = make_js_api_topic(~"PURGE", Name, Opts),
     case nats:request(Conn, Topic, <<>>, #{}) of
-        {ok, {JSON, _}} ->
-            decode_response(JSON);
+        {ok, Response} ->
+            unmarshal_response(?JS_API_V1_STREAM_PURGE_RESPONSE, Response);
         Other ->
             Other
     end.
@@ -277,8 +277,8 @@ list(Conn, Request, Opts) ->
                      json:encode(Request)
              end,
     case nats:request(Conn, Topic, BinReq, #{}) of
-        {ok, {JSON, _}} ->
-            decode_response(JSON);
+        {ok, Response} ->
+            unmarshal_response(?JS_API_V1_STREAM_LIST_RESPONSE, Response);
         Other ->
             Other
     end.
@@ -298,8 +298,8 @@ names(Conn, Request, Opts) ->
                      json:encode(Request)
              end,
     case nats:request(Conn, Topic, BinReq, #{}) of
-        {ok, {JSON, _}} ->
-            decode_response(JSON);
+        {ok, Response} ->
+            unmarshal_response(?JS_API_V1_STREAM_NAMES_RESPONSE, Response);
         Other ->
             Other
     end.
@@ -314,8 +314,8 @@ msg_get(Conn, Name, Msg, Opts)
   when is_map(Msg), is_map(Opts) ->
     Topic = make_js_api_topic(~"MSG.GET", Name, Opts),
     case nats:request(Conn, Topic, json:encode(Msg), #{}) of
-        {ok, {JSON, _}} ->
-            decode_response(JSON);
+        {ok, Response} ->
+            unmarshal_response(?JS_API_V1_STREAM_MSG_GET_RESPONSE, Response);
         Other ->
             Other
     end.
@@ -339,8 +339,8 @@ msg_delete(Conn, Name, Msg, Opts)
                 true -> json:encode(Msg)
              end,
     case nats:request(Conn, Topic, BinMsg, #{}) of
-        {ok, {JSON, _}} ->
-            decode_response(JSON);
+        {ok, Response} ->
+            unmarshal_response(?JS_API_V1_STREAM_MSG_DELETE_RESPONSE, Response);
         Other ->
             Other
     end.
@@ -362,17 +362,35 @@ make_js_api_topic(Op, Stream, #{domain := Domain}) ->
 make_js_api_topic(Op, Stream, _) ->
     <<"$JS.API.STREAM.", Op/binary, $., Stream/binary>>.
 
-json_object_push(Key, Value, Acc) ->
-    K = try binary_to_existing_atom(Key) catch _:_ -> Key end,
-    [{K, Value} | Acc].
+to_atom(Bin) when is_binary(Bin) ->
+    try binary_to_existing_atom(Bin) catch _:_ -> Bin end.
 
-decode_response(Response) ->
-    try json:decode(Response, ok, #{object_push => fun json_object_push/3}) of
+json_object_push(<<"type">>, Value, Acc)
+  when is_binary(Value) ->
+    [{type, to_atom(Value)} | Acc];
+json_object_push(Key, Value, Acc)
+  when Key =:= <<"created">>;
+       Key =:= <<"ts">>;
+       Key =:= <<"first_ts">>;
+       Key =:= <<"last_ts">> ->
+    TS = calendar:rfc3339_to_system_time(binary_to_list(Value), [{unit, nanosecond}]),
+    [{binary_to_atom(Key), TS} | Acc];
+json_object_push(Key, Value, Acc) ->
+    [{to_atom(Key), Value} | Acc].
+
+init_decoders(_) ->
+    #{object_push => fun json_object_push/3}.
+
+unmarshal_response(Type, {Response, _Opts}) ->
+    Decoders = init_decoders(Type),
+    try json:decode(Response, ok, Decoders) of
+        {#{type := Type, error := Error}, ok, _} ->
+            {error, Error};
         {#{type := Type} = JSON, ok, _} ->
-            JSON#{type := binary_to_existing_atom(Type)};
-        {JSON, ok, _} ->
-            JSON
+            {ok, maps:remove(type, JSON)};
+        _ ->
+            {error, invalid_msg_payload}
     catch
-        C:E ->
-            {error, {C, E}}
+        C:E:St ->
+            {error, {C, E, St}}
     end.

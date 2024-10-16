@@ -169,7 +169,6 @@ update_bucket(Conn, Bucket)
 update_bucket(Conn, #{bucket := Bucket} = Config, Opts)
   when is_binary(Bucket) ->
     StreamCfg = prepare_key_value_config(Config),
-    ct:pal("Update: ~p", [StreamCfg]),
     nats_stream:update(Conn, StreamCfg, Opts).
 
 update_bucket(Conn, Bucket, Config, Opts)
@@ -208,12 +207,12 @@ get(Conn, Bucket, Key, Opts)
 
 get(Conn, Bucket, Key, SeqNo, Opts) ->
     case get_msg(Conn, Bucket, Key, SeqNo, Opts) of
-        #{message := #{hdrs := Headers}} = Response ->
+        {ok, #{message := #{hdrs := Headers}} = Response} ->
             case lists:keyfind(?KV_OP, 1, Headers) of
                 {?KV_OP, Op} when Op =:= ?KV_DEL; Op =:= ?KV_PURGE ->
                     {deleted, Response};
                 _ ->
-                    Response
+                    {ok, Response}
             end;
         Response ->
             Response
@@ -230,8 +229,8 @@ get_last_msg_for_subject(Conn, Bucket, Key, #{allow_direct := true} = Opts) ->
     GetStr =  <<?BUCKET_NAME(Bucket)/binary, $., ?SUBJECT_NAME(Bucket, Key)/binary>>,
     Topic = make_js_direct_api_topic(~"GET", GetStr, Opts),
     case nats:request(Conn, Topic, <<>>, #{}) of
-        {ok, {Content, Headers}} ->
-            direct_msg_response(Content, Headers);
+        {ok, Response} ->
+            direct_msg_response(Response);
         Other ->
             Other
     end;
@@ -242,16 +241,16 @@ get_last_msg_for_subject(Conn, Bucket, Key, Opts) ->
 get_msg(Conn, Bucket, Req, #{allow_direct := true} = Opts) ->
     Topic = make_js_direct_api_topic(~"GET", ?BUCKET_NAME(Bucket), Opts),
     case nats:request(Conn, Topic, json:encode(Req), Opts) of
-        {ok, {Content, Headers}} ->
-            direct_msg_response(Content, Headers);
+        {ok, Response} ->
+            direct_msg_response(Response);
         Other ->
             Other
     end;
 get_msg(Conn, Bucket, Req, Opts) ->
     Name = ?BUCKET_NAME(Bucket),
     case nats_stream:msg_get(Conn, Name, Req, Opts) of
-        #{message := Msg} = Response ->
-            Response#{message := get_response_msg(Msg)};
+        {ok, #{message := Msg} = Response} ->
+            {ok, Response#{message := get_response_msg(Msg)}};
         Other ->
             Other
     end.
@@ -267,8 +266,8 @@ equal signs, and dots.
 put(Conn, Bucket, Key, Value)
   when is_binary(Bucket), is_binary(Key) ->
     case nats:request(Conn, ?SUBJECT_NAME(Bucket, Key), Value, #{}) of
-        {ok, {JSON, _}} ->
-            decode_response(JSON);
+        {ok, Response} ->
+            unmarshal_response(Response);
         Other ->
             Other
     end.
@@ -286,15 +285,17 @@ create(Conn, Bucket, Key, Value) ->
 create(Conn, Bucket, Key, Value, Opts)
   when is_binary(Bucket), is_binary(Key) ->
     case update(Conn, Bucket, Key, Value, 0) of
-        #{error := _} ->
+        {error, #{err_code := ?JS_ERR_CODE_STREAM_WRONG_LAST_SEQUENCE}} ->
             case get(Conn, Bucket, Key, last, Opts) of
                 {deleted, #{message := #{seq := LastRev}}}->
                     update(Conn, Bucket, Key, Value, LastRev);
                 _ ->
                     {error, exists}
             end;
-        #{stream := _, seq := _} = V ->
-            V
+        {error, _} = Error ->
+            Error;
+        {ok, #{stream := _, seq := _}} = Result ->
+            Result
     end.
 
 -doc """
@@ -306,9 +307,8 @@ update(Conn, Bucket, Key, Value, SeqNo)
     Header =
         nats_hd:header([{?EXPECTED_LAST_SUBJ_SEQ_HDR, integer_to_binary(SeqNo)}]),
     case nats:request(Conn, ?SUBJECT_NAME(Bucket, Key), Value, #{header => Header}) of
-        {ok, {JSON, _}} ->
-            ?LOG(debug, "UpdateJSON: ~p", [JSON]),
-            decode_response(JSON);
+        {ok, Response} ->
+            unmarshal_response(Response);
         Other ->
             Other
     end.
@@ -343,9 +343,8 @@ delete(Conn, Bucket, Key, Opts)
         end,
     Header = nats_hd:header(Headers),
     case nats:request(Conn, ?SUBJECT_NAME(Bucket, Key), <<>>, #{header => Header}) of
-        {ok, {JSON, _}} ->
-            ?LOG(debug, "UpdateJSON: ~p", [JSON]),
-            decode_response(JSON);
+        {ok, Response} ->
+            unmarshal_response(Response);
         Other ->
             Other
     end.
@@ -379,27 +378,44 @@ make_js_direct_api_topic(Op, Stream, #{domain := Domain}) ->
 make_js_direct_api_topic(Op, Stream, _) ->
     <<"$JS.API.DIRECT.", Op/binary, $., Stream/binary>>.
 
-json_object_push(Key, Value, Acc) ->
-    K = try binary_to_existing_atom(Key) catch _:_ -> Key end,
-    [{K, Value} | Acc].
+to_atom(Bin) when is_binary(Bin) ->
+    try binary_to_existing_atom(Bin) catch _:_ -> Bin end.
 
-decode_response(Response) ->
-    try json:decode(Response, ok, #{object_push => fun json_object_push/3}) of
-        {#{type := Type} = JSON, ok, _} ->
-            JSON#{type := binary_to_existing_atom(Type)};
+json_object_push(<<"type">>, Value, Acc)
+  when is_binary(Value) ->
+    [{type, to_atom(Value)} | Acc];
+json_object_push(Key, Value, Acc)
+  when Key =:= <<"created">>;
+       Key =:= <<"ts">>;
+       Key =:= <<"first_ts">>;
+       Key =:= <<"last_ts">> ->
+    TS = calendar:rfc3339_to_system_time(binary_to_list(Value), [{unit, nanosecond}]),
+    [{binary_to_atom(Key), TS} | Acc];
+json_object_push(Key, Value, Acc) ->
+    [{to_atom(Key), Value} | Acc].
+
+unmarshal_response({Response, _Opts}) ->
+    Decoders = #{object_push => fun json_object_push/3},
+    try json:decode(Response, ok, Decoders) of
+        {#{error := Error}, ok, _} ->
+            {error, Error};
         {JSON, ok, _} ->
-            JSON
+            {ok, JSON};
+        _ ->
+            {error, invalid_msg_payload}
     catch
-        C:E ->
-            {error, {C, E}}
+        C:E:St ->
+            {error, {C, E, St}}
     end.
 
-direct_msg_response(Content, #{header := <<"NATS/1.0\r\n", HdrStr/binary>>}) ->
+direct_msg_response({#{error := Error}, _}) ->
+    {error, Error};
+direct_msg_response({Content, #{header := <<"NATS/1.0\r\n", HdrStr/binary>>}}) ->
     Headers = nats_hd:parse_headers(HdrStr),
     ?LOG(debug, "Headers: ~p", [Headers]),
     Msg = lists:foldl(fun direct_msg_response_f/2,
                       #{data => Content, hdrs => Headers}, Headers),
-    #{type => ?JS_API_V1_STREAM_MSG_GET_RESPONSE, message => Msg}.
+    {ok, #{message => Msg}}.
 
 direct_msg_response_f({<<"Nats-Subject">>, Subject}, Msg) ->
     Msg#{subject => Subject};

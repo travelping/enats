@@ -87,8 +87,8 @@ create(Conn, Stream, Name, Config, Opts)
 create_req(Conn, ConsumerId, Config, Opts) ->
     Topic = make_js_api_create_topic(ConsumerId, Opts),
     case nats:request(Conn, Topic, json:encode(Config), #{}) of
-        {ok, {JSON, _}} ->
-            decode_response(JSON);
+        {ok, Response} ->
+            unmarshal_response(?JS_API_V1_CONSUMER_CREATE_RESPONSE, Response);
         Other ->
             Other
     end.
@@ -108,8 +108,8 @@ get(Conn, Stream, Name, Opts)
   when is_binary(Stream), is_binary(Name) ->
     Topic = make_js_api_topic(~"INFO", <<Stream/binary, $., Name/binary>>, Opts),
     case nats:request(Conn, Topic, <<>>, #{}) of
-        {ok, {JSON, _}} ->
-            decode_response(JSON);
+        {ok, Response} ->
+            unmarshal_response(?JS_API_V1_CONSUMER_INFO_RESPONSE, Response);
         Other ->
             Other
     end.
@@ -129,8 +129,8 @@ delete(Conn, Stream, Name, Opts)
   when is_binary(Stream), is_binary(Name) ->
     Topic = make_js_api_topic(~"DELETE", <<Stream/binary, $., Name/binary>>, Opts),
     case nats:request(Conn, Topic, <<>>, #{}) of
-        {ok, {JSON, _}} ->
-            decode_response(JSON);
+        {ok, Response} ->
+            unmarshal_response(?JS_API_V1_CONSUMER_DELETE_RESPONSE, Response);
         Other ->
             Other
     end.
@@ -228,19 +228,37 @@ make_js_api_topic(Op, Topic, #{domain := Domain}) ->
 make_js_api_topic(Op, Topic, _) ->
     <<"$JS.API.CONSUMER.", Op/binary, $., Topic/binary>>.
 
-json_object_push(Key, Value, Acc) ->
-    K = try binary_to_existing_atom(Key) catch _:_ -> Key end,
-    [{K, Value} | Acc].
+to_atom(Bin) when is_binary(Bin) ->
+    try binary_to_existing_atom(Bin) catch _:_ -> Bin end.
 
-decode_response(Response) ->
-    try json:decode(Response, ok, #{object_push => fun json_object_push/3}) of
+json_object_push(<<"type">>, Value, Acc)
+  when is_binary(Value) ->
+    [{type, to_atom(Value)} | Acc];
+json_object_push(Key, Value, Acc)
+  when Key =:= <<"created">>;
+       Key =:= <<"ts">>;
+       Key =:= <<"first_ts">>;
+       Key =:= <<"last_ts">> ->
+    TS = calendar:rfc3339_to_system_time(binary_to_list(Value), [{unit, nanosecond}]),
+    [{binary_to_atom(Key), TS} | Acc];
+json_object_push(Key, Value, Acc) ->
+    [{to_atom(Key), Value} | Acc].
+
+init_decoders(_) ->
+    #{object_push => fun json_object_push/3}.
+
+unmarshal_response(Type, {Response, _Opts}) ->
+    Decoders = init_decoders(Type),
+    try json:decode(Response, ok, Decoders) of
+        {#{type := Type, error := Error}, ok, _} ->
+            {error, Error};
         {#{type := Type} = JSON, ok, _} ->
-            JSON#{type := binary_to_existing_atom(Type)};
-        {JSON, ok, _} ->
-            JSON
+            {ok, maps:remove(type, JSON)};
+        _ ->
+            {error, invalid_msg_payload}
     catch
-        C:E ->
-            {error, {C, E}}
+        C:E:St ->
+            {error, {C, E, St}}
     end.
 
 ack(ack) -> ~"+ACK";

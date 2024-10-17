@@ -175,6 +175,10 @@ kv(_Client, Con, _Config) ->
     ?assertMatch({ok, #{config := _}}, BucketCreateR1),
     {ok, #{config := BucketCfg}} = BucketCreateR1,
 
+    BucketGetR1 = nats_kv:get_bucket(Con, ?KV_BUCKET),
+    ct:pal("BucketGetR1: ~p", [BucketGetR1]),
+    ?assertMatch({ok, #{config := _}}, BucketGetR1),
+
     BucketCreateR2 = nats_kv:create_bucket(Con, ?KV_BUCKET, #{ttl => 1_000_000_000}, #{}),
     ct:pal("R2: ~p", [BucketCreateR2]),
     ?assertMatch({error, #{code := _}}, BucketCreateR2),

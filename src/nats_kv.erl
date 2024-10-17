@@ -32,6 +32,7 @@
 
 %% K/V bucket API
 -export([
+         get_bucket/2, get_bucket/3,
          create_bucket/2, create_bucket/3, create_bucket/4,
          update_bucket/2, update_bucket/3, update_bucket/4,
          delete_bucket/2, delete_bucket/3
@@ -132,6 +133,14 @@
 %%%===================================================================
 %%% API
 %%%===================================================================
+
+get_bucket(Conn, Bucket)
+    when is_binary(Bucket) ->
+    get_bucket(Conn, Bucket, #{}).
+
+get_bucket(Conn, Bucket, Opts)
+  when is_binary(Bucket) ->
+    nats_stream:get(Conn, ?BUCKET_NAME(Bucket), Opts).
 
 -doc """
 CreateKeyValue will create a KeyValue store with the given

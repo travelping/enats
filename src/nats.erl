@@ -89,8 +89,8 @@
                          rcvbuf => non_neg_integer(),
                          sndbuf => non_neg_integer(),
                          reuseaddr => boolean()}.
-%% -type nats_host() :: inet:socket_address() | inet:hostname().
--type nats_host() :: inet:socket_address().
+-type nats_host() :: inet:socket_address() | inet:hostname() | binary().
+%% -type nats_host() :: inet:socket_address().
 
 -type opts() :: #{socket_opts    => socket_opts(),
                   verbose        => boolean(),
@@ -104,7 +104,7 @@
                   version        => binary(),
                   headers        => boolean(),
                   no_responders  => boolean(),
-                  buffer_size    => non_neg_integer(),
+                  buffer_size    => -1 | non_neg_integer(),
                   max_batch_size => non_neg_integer(),
                   send_timeout   => non_neg_integer()
                  }.
@@ -1139,7 +1139,7 @@ get_host_addr({_, _, _, _, _, _, _, _} = IP) ->
     {ok, IP};
 get_host_addr(Bin) when is_binary(Bin) ->
     get_host_addr(binary_to_list(Bin));
-get_host_addr(Host) when is_list(Host) ->
+get_host_addr(Host) when is_list(Host); is_atom(Host) ->
     maybe
         {error, _} ?= inet:getaddrs(Host, inet6),
         {error, _} ?= inet:getaddrs(Host, inet)

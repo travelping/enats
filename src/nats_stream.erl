@@ -267,7 +267,7 @@ list(Conn) ->
 
 list(Conn, Opts) ->
     JsKeys = [subject, offset],
-    list(Conn, maps:with(JsKeys), maps:without(Opts)).
+    list(Conn, maps:with(JsKeys, Opts), maps:without(JsKeys, Opts)).
 
 list(Conn, Request, Opts) ->
     Topic = make_js_api_topic(~"LIST", Opts),
@@ -288,7 +288,7 @@ names(Conn) ->
 
 names(Conn, Opts) ->
     JsKeys = [subject, offset],
-    names(Conn, maps:with(JsKeys), maps:without(Opts)).
+    names(Conn, maps:with(JsKeys, Opts), maps:without(JsKeys, Opts)).
 
 names(Conn, Request, Opts) ->
     Topic = make_js_api_topic(~"NAMES", Opts),

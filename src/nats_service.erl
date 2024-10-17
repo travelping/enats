@@ -41,18 +41,18 @@ serve(Conn, #{name := _, version := _,
               module := Module, state := State, endpoints := Endpoints} = Svc) ->
     Exports = try
                   sets:from_list(Module:module_info(exports), [{version, 2}])
-              catch _:_ -> erlang:exit(badarg, [Svc]) end,
+              catch _:_ -> erlang:error(badarg, [Svc]) end,
     SvcEndpoints =
         lists:map(
           fun(#{name := _, function := Function} = EndP) ->
                   case sets:is_element({Function, 6}, Exports) of
                       true -> ok;
-                      false -> erlang:exit(badarg, [EndP])
+                      false -> erlang:error(badarg, [EndP])
                   end,
                   nats:endpoint(
                     maps:with([name, group_name, queue_group, metadata], EndP), Function);
              (EndP) ->
-                  erlang:exit(badarg, [EndP])
+                  erlang:error(badarg, [EndP])
           end, Endpoints),
     Service =
         nats:service(

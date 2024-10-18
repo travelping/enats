@@ -218,6 +218,9 @@ kv(_Client, Con, _Config) ->
     ct:pal("KvCreateR2: ~p", [KvCreateR2]),
     ?assertMatch({error, exists}, KvCreateR2),
 
+    KvListR1 = nats_kv:watch(Con, ?KV_BUCKET, #{}, #{}),
+    ct:pal("KvListR1: ~p", [KvListR1]),
+
     KvPurgeR1 = nats_kv:purge(Con, ?KV_BUCKET, ?KV_KEY_2),
     ct:pal("KvPurgeR1: ~p", [KvPurgeR1]),
     ?assertMatch({ok, #{stream := _, seq := _}}, KvPurgeR1),

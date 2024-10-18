@@ -29,7 +29,9 @@
          unsub/3,
          disconnect/1,
          is_ready/1,
-         request/4
+         request/4,
+         get_inbox_topic/1,
+         sub_inbox_slot/1, sub_inbox_slot/2, unsub_inbox_slot/2
         ]).
 
 %% internal API
@@ -50,6 +52,7 @@
               disconnect/1,
               is_ready/1,
               request/4,
+              sub_inbox_slot/1, sub_inbox_slot/2, unsub_inbox_slot/2,
               serve/2, service/4, endpoint/2,
               dump_subs/1]).
 
@@ -221,7 +224,7 @@ unsub(Server, SRef, Opts) ->
 
 request(Server, Subject, Payload, Opts) ->
     maybe
-        {ok, Inbox} ?= gen_statem:call(Server, get_inbox_topic),
+        {ok, Inbox} ?= get_inbox_topic(Server),
         try gen_statem:call(Server, {request, Subject, Inbox, Payload, Opts}) of
             {ok, {_, #{header := <<"NATS/1.0 503\r\n", _/binary>>}}} ->
                 {error, no_responders};
@@ -276,6 +279,21 @@ service(SvcDesc, EndpDesc, Module, State) ->
 endpoint(EndpDesc, Function) ->
     #endpoint{function = Function,
               endpoint = maps:merge(#{queue_group => ~"q", metadata => null}, EndpDesc)}.
+
+get_inbox_topic(Server) ->
+    gen_statem:call(Server, get_inbox_topic).
+
+sub_inbox_slot(Server) ->
+    sub_inbox_slot(Server, self()).
+
+sub_inbox_slot(Server, Pid) ->
+    maybe
+        {ok, Inbox} ?= get_inbox_topic(Server),
+        gen_statem:call(Server, {sub_inbox_slot, Inbox, Pid})
+    end.
+
+unsub_inbox_slot(Server, Id) ->
+    gen_statem:call(Server, {unsub_inbox_slot, Id}).
 
 %%%===================================================================
 %%% gen_statem callbacks
@@ -479,10 +497,31 @@ handle_event({call, From}, {request, Subject, Inbox, Payload, Opts}, State, Data
     ReqId = rnd_request_id(),
     ReqInbox = <<Inbox/binary, ReqId/binary>>,
 
-    put_inbox_reqid(ReqId, From, Data),
+    put_inbox_reqid(ReqId, one_shot, {from, From}, Data),
 
     Msg = mk_pub_msg(Subject, Payload, Opts#{reply_to => ReqInbox}),
     send_msg(Msg, State, Data);
+
+handle_event({call, From}, {sub_inbox_slot, Inbox, Pid}, _State, Data) ->
+    Ref = make_ref(),
+    ReqId = rnd_request_id(),
+    ReqInbox = <<Inbox/binary, ReqId/binary>>,
+
+    put_inbox_reqid(ReqId, persistent, {send, Pid, Ref}, Data),
+    {keep_state_and_data, [{reply, From, {ok, ReqInbox, Ref}}]};
+
+handle_event({call, From}, {unsub_inbox_slot, Subject}, _State, #{inbox := Inbox} = Data) ->
+    Reply =
+        case Subject of
+            <<Inbox:(byte_size(Inbox))/bytes, ReqId/binary>> ->
+                remove_inbox_reqid(ReqId, Data),
+                ok;
+            _ ->
+                ?LOG(debug, "NATS unsub inbox slot with invalid structure: ~0p, Inbox: ~0p",
+                     [Subject, Inbox]),
+                {error, invalid}
+        end,
+    {keep_state_and_data, [{reply, From, Reply}]};
 
 handle_event({call, From},
              {serve, #svc{service = #{name := SvcName}, endpoints = EndPs} = Svc0},
@@ -714,9 +753,11 @@ handle_nats_inbox_msg(Subject, Payload, Opts, {_, #{inbox := Inbox} = Data} = De
         <<Inbox:(byte_size(Inbox))/bytes, ReqId/binary>> ->
             ?LOG(debug, "NATS inbox msg with request id: ~0p", [ReqId]),
             case take_inbox_reqid(ReqId, Data) of
-                [From] ->
+                {from, From} ->
                     gen_statem:reply(From, {ok, {Payload, Opts}});
-                [] ->
+                {send, Pid, Ref} ->
+                    Pid ! {msg, Ref, Payload, Opts};
+                _ ->
                     ok
             end;
         _ ->
@@ -1045,14 +1086,26 @@ demonitor_sub_pid(NotifyPid, Data) ->
             ok
     end.
 
-put_inbox_reqid(ReqId, From, #{tid := Tid}) ->
-    true = ets:insert(Tid, {#req{req_id = ReqId}, From}).
+put_inbox_reqid(ReqId, Type, Action, #{tid := Tid}) ->
+    true = ets:insert(Tid, {#req{req_id = ReqId}, {Type, Action}}).
 
 take_inbox_reqid(ReqId, #{tid := Tid}) ->
-    case ets:take(Tid, #req{req_id = ReqId}) of
-        [{_, From}] -> [From];
-        [] -> []
+    Key = #req{req_id = ReqId},
+    case ets:lookup(Tid, Key) of
+        [{_, {Type, Action}}] ->
+            case Type of
+                one_shot ->
+                    ets:delete(Tid, Key);
+                _ ->
+                    ok
+            end,
+            Action;
+        [] ->
+            false
     end.
+
+remove_inbox_reqid(ReqId, #{tid := Tid}) ->
+    ets:delete(Tid, #req{req_id = ReqId}).
 
 put_pid_sub(Pid, Sid, #{tid := Tid}) ->
     true = ets:insert(Tid, {#sub{pid = Pid, sid = Sid}}).

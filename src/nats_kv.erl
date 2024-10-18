@@ -40,6 +40,7 @@
 
 %% K/V store API
 -export([
+         watch/4,
          get/3, get/4, get/5, get_msg/4,
          put/4,
          create/4, create/5,
@@ -199,6 +200,75 @@ delete_bucket(Conn, Bucket, Opts)
   when is_binary(Bucket), is_map(Opts) ->
     nats_stream:delete(Conn, ?BUCKET_NAME(Bucket), Opts).
 
+watch(Conn, Bucket, WatchOpts, Opts)
+  when is_binary(Bucket), is_map(WatchOpts), is_map(Opts) ->
+    %% use a ephemeral consumer
+
+    %% {
+    %%   "stream_name": "KV_FOO",
+    %%   "config": {
+    %%     "deliver_policy": "last_per_subject",
+    %%     "ack_policy": "none",
+    %%     "ack_wait": 79200000000000,
+    %%     "max_deliver": 1,
+    %%     "filter_subject": "$KV.FOO.\\u003e",
+    %%     "replay_policy": "instant",
+    %%     "flow_control": true,
+    %%     "idle_heartbeat": 5000000000,
+    %%     "headers_only": true,
+    %%     "deliver_subject": "_INBOX.IYYrsHiLQxScla5idhSjPl",
+    %%     "num_replicas": 1,
+    %%     "mem_storage": true
+    %%   }
+    %% }
+
+    {ok, DeliverSubject, WatchRef} = nats:sub_inbox_slot(Conn),
+    WatchConfig =
+        #{config =>
+              #{deliver_policy => last_per_subject,
+                ack_policy => none,
+                ack_wait => 79200000000000,
+                max_deliver => 1,
+                filter_subject => ?SUBJECT_NAME(Bucket, ~">"),
+                replay_policy => instant,
+                flow_control => true,
+                idle_heartbeat => 5000000000,
+                headers_only => true,
+                deliver_subject => DeliverSubject,
+                num_replicas => 1,
+                mem_storage => true
+               }
+         },
+    ct:pal("WatchRef: ~p~nSubj: ~p~n", [WatchRef, DeliverSubject]),
+    ?LOG(debug, "WatchRef: ~p~nSubj: ~p~n", [WatchRef, DeliverSubject]),
+    {ok, Watch} = nats_consumer:create(Conn, ?BUCKET_NAME(Bucket), WatchConfig, Opts),
+    ct:pal("Watch: ~p~n", [Watch]),
+    NumPending = maps:get(num_pending, Watch, 0),
+
+    Result = watch_loop(Conn, WatchRef, NumPending, []),
+    watch_stop(Conn, WatchRef, Watch),
+
+    Result.
+
+watch_stop(Conn, WatchRef, #{config := #{deliver_subject := DeliverSubject}} = Watch) ->
+    nats:unsub(Conn, DeliverSubject),
+    nats_consumer:delete(Conn, Watch),
+    %% remove pending messages from the watch
+    receive {msg, WatchRef, _, _} -> ok after 0 -> ok end,
+    ok.
+
+watch_loop(_Conn, _WatchRef, 0, Msgs) ->
+    {ok, lists:reverse(Msgs)};
+watch_loop(Conn, WatchRef, Cnt, Msgs) ->
+    receive
+        {Conn, WatchRef, Msg} ->
+            ct:pal("WatchLoop: Old ~p", [Msg]),
+            watch_loop(Conn, WatchRef, Cnt - 1, [Msg | Msgs]);
+        {msg, WatchRef, Msg, Opts} ->
+            ct:pal("WatchLoop: New ~p, Opts: ~p", [Msg, Opts]),
+            watch_loop(Conn, WatchRef, Cnt - 1, [Msg | Msgs])
+    end.
+
 -doc """
 Get returns the latest value for the key. If the key does not exist,
 ErrKeyNotFound will be returned.
@@ -231,8 +301,7 @@ get_msg(Conn, Bucket, Key, last, Opts) ->
     get_last_msg_for_subject(Conn, Bucket, Key, Opts);
 get_msg(Conn, Bucket, Key, SeqNo, Opts)
   when is_integer(SeqNo) ->
-    get_msg(Conn, Bucket, #{last_by_subject => ?SUBJECT_NAME(Bucket, Key),
-                            seq => SeqNo}, Opts).
+    get_msg(Conn, Bucket, #{last_by_subject => Key, seq => SeqNo}, Opts).
 
 get_last_msg_for_subject(Conn, Bucket, Key, #{allow_direct := true} = Opts) ->
     GetStr =  <<?BUCKET_NAME(Bucket)/binary, $., ?SUBJECT_NAME(Bucket, Key)/binary>>,
@@ -244,12 +313,12 @@ get_last_msg_for_subject(Conn, Bucket, Key, #{allow_direct := true} = Opts) ->
             Other
     end;
 get_last_msg_for_subject(Conn, Bucket, Key, Opts) ->
-    Req = #{last_by_subj => ?SUBJECT_NAME(Bucket, Key)},
-    get_msg(Conn, Bucket, Req, Opts).
+    get_msg(Conn, Bucket, #{last_by_subj => Key}, Opts).
 
 get_msg(Conn, Bucket, Req, #{allow_direct := true} = Opts) ->
     Topic = make_js_direct_api_topic(~"GET", ?BUCKET_NAME(Bucket), Opts),
-    case nats:request(Conn, Topic, json:encode(Req), Opts) of
+    JSON = json:encode(marshal_get_request(Bucket, Req)),
+    case nats:request(Conn, Topic, JSON, Opts) of
         {ok, Response} ->
             direct_msg_response(Response);
         Other ->
@@ -257,7 +326,8 @@ get_msg(Conn, Bucket, Req, #{allow_direct := true} = Opts) ->
     end;
 get_msg(Conn, Bucket, Req, Opts) ->
     Name = ?BUCKET_NAME(Bucket),
-    case nats_stream:msg_get(Conn, Name, Req, Opts) of
+    JSON = marshal_get_request(Bucket, Req),
+    case nats_stream:msg_get(Conn, Name, JSON, Opts) of
         {ok, #{message := Msg} = Response} ->
             {ok, Response#{message := get_response_msg(Msg)}};
         Other ->
@@ -387,6 +457,29 @@ make_js_direct_api_topic(Op, Stream, #{domain := Domain}) ->
 make_js_direct_api_topic(Op, Stream, _) ->
     <<"$JS.API.DIRECT.", Op/binary, $., Stream/binary>>.
 
+marshal_get_request(Bucket, Req) ->
+    maps:map(
+      fun(K, V)
+            when K =:= last_by_subj; K =:= next_by_subj ->
+              ?SUBJECT_NAME(Bucket, V);
+         (K, V)
+            when K =:= start_time; K =:= up_to_time ->
+              if V < 0 ->
+                      %% NATS uses this mean `never`
+                      ~"0001-01-01T00:00:00Z";
+                 V >= 0 ->
+                      iolist_to_binary(
+                        calendar:system_time_to_rfc3339(V, [{unit, nanosecond}, {offset, "Z"}]))
+              end;
+         (multi_last, Subjects) ->
+              lists:map(fun(S) -> ?SUBJECT_NAME(Bucket, S) end, Subjects);
+         (batch, V) when V > 1 ->
+              ?LOG(cirtical, "enats: batch get requests are not supported"),
+              V;
+         (_K, V) ->
+              V
+      end, Req).
+
 to_atom(Bin) when is_binary(Bin) ->
     try binary_to_existing_atom(Bin) catch _:_ -> Bin end.
 
@@ -419,9 +512,23 @@ unmarshal_response({Response, _Opts}) ->
 
 direct_msg_response({#{error := Error}, _}) ->
     {error, Error};
+
+direct_msg_response({_Content,
+                     #{header := <<"NATS/1.0 ", Code:3/bytes, " ", Rest/binary>>}}) ->
+    {Pos, _} = binary:match(Rest, <<"\r">>),
+    <<Msg:Pos/binary, "\r\n", _HdrStr/binary>> = Rest,
+
+    %% Headers = nats_hd:parse_headers(HdrStr),
+    Error0 = #{code => binary_to_integer(Code), description => Msg},
+    Error =
+        case Msg of
+            <<"Message Not Found">> -> Error0#{err_code => ?JS_ERR_CODE_MESSAGE_NOT_FOUND};
+            _ -> Error0
+        end,
+    {error, Error};
+
 direct_msg_response({Content, #{header := <<"NATS/1.0\r\n", HdrStr/binary>>}}) ->
     Headers = nats_hd:parse_headers(HdrStr),
-    ?LOG(debug, "Headers: ~p", [Headers]),
     Msg = lists:foldl(fun direct_msg_response_f/2,
                       #{data => Content, hdrs => Headers}, Headers),
     {ok, #{message => Msg}}.

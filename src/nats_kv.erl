@@ -222,7 +222,13 @@ watch(Conn, Bucket, WatchOpts, Opts)
     %%   }
     %% }
 
-    {ok, DeliverSubject, WatchRef} = nats:sub_inbox_slot(Conn),
+    Inbox = <<"_MY_KV_SUB.", (nats:rnd_topic_id())/binary>>,
+    SubSubject = <<Inbox/binary, ".*">>,
+    DeliverSubject = <<Inbox/binary, $. , (nats:rnd_topic_id())/binary>>,
+    {ok, Sid} = nats:sub(Conn, SubSubject),
+
+    %% DeliverSubject =  <<"_MY_KV_SUB.", (nats:rnd_topic_id())/binary>>,
+    %% {ok, Sid} = nats:sub(Conn, DeliverSubject),
     WatchConfig =
         #{config =>
               #{deliver_policy => last_per_subject,
@@ -239,34 +245,34 @@ watch(Conn, Bucket, WatchOpts, Opts)
                 mem_storage => true
                }
          },
-    ct:pal("WatchRef: ~p~nSubj: ~p~n", [WatchRef, DeliverSubject]),
-    ?LOG(debug, "WatchRef: ~p~nSubj: ~p~n", [WatchRef, DeliverSubject]),
+    ct:pal("Sid: ~p~nSubj: ~p~n", [Sid, DeliverSubject]),
+    ?LOG(debug, "Sid: ~p~nSubj: ~p~n", [Sid, DeliverSubject]),
     {ok, Watch} = nats_consumer:create(Conn, ?BUCKET_NAME(Bucket), WatchConfig, Opts),
     ct:pal("Watch: ~p~n", [Watch]),
     NumPending = maps:get(num_pending, Watch, 0),
 
-    Result = watch_loop(Conn, WatchRef, NumPending, []),
-    watch_stop(Conn, WatchRef, Watch),
+    Result = watch_loop(Conn, Sid, NumPending, []),
+    watch_stop(Conn, Sid, Watch),
 
     Result.
 
-watch_stop(Conn, WatchRef, #{config := #{deliver_subject := DeliverSubject}} = Watch) ->
+watch_stop(Conn, Sid, #{config := #{deliver_subject := DeliverSubject}} = Watch) ->
     nats:unsub(Conn, DeliverSubject),
     nats_consumer:delete(Conn, Watch),
     %% remove pending messages from the watch
-    receive {msg, WatchRef, _, _} -> ok after 0 -> ok end,
+    receive {msg, Sid, _} -> ok after 0 -> ok end,
     ok.
 
-watch_loop(_Conn, _WatchRef, 0, Msgs) ->
+watch_loop(_Conn, _Sid, 0, Msgs) ->
     {ok, lists:reverse(Msgs)};
-watch_loop(Conn, WatchRef, Cnt, Msgs) ->
+watch_loop(Conn, Sid, Cnt, Msgs) ->
     receive
-        {Conn, WatchRef, Msg} ->
+        {Conn, Sid, Msg} ->
             ct:pal("WatchLoop: Old ~p", [Msg]),
-            watch_loop(Conn, WatchRef, Cnt - 1, [Msg | Msgs]);
-        {msg, WatchRef, Msg, Opts} ->
+            watch_loop(Conn, Sid, Cnt - 1, [Msg | Msgs]);
+        {msg, Sid, Msg, Opts} ->
             ct:pal("WatchLoop: New ~p, Opts: ~p", [Msg, Opts]),
-            watch_loop(Conn, WatchRef, Cnt - 1, [Msg | Msgs])
+            watch_loop(Conn, Sid, Cnt - 1, [Msg | Msgs])
     end.
 
 -doc """

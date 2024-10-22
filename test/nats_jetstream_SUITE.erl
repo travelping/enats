@@ -31,6 +31,7 @@
 -define(KV_BUCKET, ~"TEST_KV").
 -define(KV_KEY_1, ~"FOO-1").
 -define(KV_KEY_2, ~"FOO-2").
+-define(KV_KEY_DEL, ~"FOO-DEL").
 
 all() ->
     [jetstream, kv].
@@ -217,6 +218,17 @@ kv(_Client, Con, _Config) ->
     KvCreateR2 = nats_kv:create(Con, ?KV_BUCKET, ?KV_KEY_2, ~"BOO-1"),
     ct:pal("KvCreateR2: ~p", [KvCreateR2]),
     ?assertMatch({error, exists}, KvCreateR2),
+
+    KvCreateRDel = nats_kv:create(Con, ?KV_BUCKET, ?KV_KEY_DEL, ~"DEL"),
+    ?assertMatch({ok, #{stream := _, seq := _}}, KvCreateRDel),
+    KvDeleteRDel = nats_kv:delete(Con, ?KV_BUCKET, ?KV_KEY_DEL),
+    ?assertMatch({ok, #{stream := _, seq := _}}, KvDeleteRDel),
+
+    KvListR1 = nats_kv:list_keys(Con, ?KV_BUCKET, #{}, #{}),
+    ct:pal("KvListR1: ~p", [KvListR1]),
+    ?assertMatch({ok, [_|_]}, KvListR1),
+    {ok, Keys} = KvListR1,
+    ?assertEqual(2, length(Keys)),
 
     KvPurgeR1 = nats_kv:purge(Con, ?KV_BUCKET, ?KV_KEY_2),
     ct:pal("KvPurgeR1: ~p", [KvPurgeR1]),

@@ -1,0 +1,25 @@
+name: publish to hex.pm
+
+on:
+  push:
+    tags:
+      - '*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-22.04
+    container:
+      image: erlang:27.1-alpine
+    steps:
+    - name: Prepare
+      run: |
+           apk update
+           apk --no-cache upgrade
+           apk --no-cache add git
+    - uses: actions/checkout@v4
+    - name: Publish to Hex.pm
+      env:
+        HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+      run: |
+           rebar3 ex_edoc
+           rebar3 hex publish -r hexpm --yes

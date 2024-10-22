@@ -24,6 +24,9 @@
 
 %% NOTE: a gnatsd instance must be running at 127.0.0.1:4222
 
+suite() ->
+    [{timetrap, {minutes,1}}].
+
 all() ->
     [connect_ok,
      connect_fail_no_host,
@@ -42,7 +45,8 @@ all() ->
      micro_verbose_ok].
 
 init_per_suite(Config) ->
-    _ = logger:set_primary_config(level, debug),
+    Level = ct:get_config(log_level, info),
+    _ = logger:set_primary_config(level, Level),
     application:ensure_started(enats),
     Config.
 
@@ -59,7 +63,8 @@ connect_ok(_) ->
     %% connect returns a new connection process, once the connection succeeds,
     %% a {Connection, ready} message is sent to the owner
 
-    {ok, C} = nats:connect(<<"127.0.0.1">>, 4222),
+    {ok, Host, Port} = nats_addr(),
+    {ok, C} = nats:connect(Host, Port),
     receive
         {C, ready} -> ok
     after 1000 ->
@@ -71,7 +76,8 @@ connect_fail_no_host(_) ->
     %% If the connection fails (host not found),
     %% a {Connection, {error, nxdomain}} message is sent to the owner
 
-    {ok, C} = nats:connect(<<"doesnt-exist.google.com">>, 4222),
+    {ok, _Host, Port} = nats_addr(),
+    {ok, C} = nats:connect(<<"doesnt-exist.google.com">>, Port),
     receive
         {C, {error, nxdomain}} -> ok
     after 1000 ->
@@ -83,8 +89,9 @@ connect_fail_no_port(_) ->
     %% If the connection fails (port is not open),
     %% a {Connection, {error, econnrefused}} message is sent to the owner
 
+    {ok, Host, _Port} = nats_addr(),
     NonExistingPort = 4444,
-    {ok, C} = nats:connect(<<"127.0.0.1">>, NonExistingPort),
+    {ok, C} = nats:connect(Host, NonExistingPort),
     receive
         {C, {error, econnrefused}} -> ok
     after 1000 ->
@@ -95,7 +102,8 @@ connect_verbose_ok(_) ->
     %% connect returns a new connection process, once the connection succeeds,
     %% a {Connection, ready} message is sent to the owner
 
-    {ok, C} = nats:connect(<<"127.0.0.1">>, 4222, #{verbose => true}),
+    {ok, Host, Port} = nats_addr(),
+    {ok, C} = nats:connect(Host, Port, #{verbose => true}),
     receive
         {C, ready} -> ok
     after 1000 ->
@@ -108,8 +116,9 @@ connect_verbose_fail(_) ->
     %% If the connection fails (port is not open),
     %% a {Connection, {error, econnrefused}} message is sent to the owner
 
+    {ok, Host, _Port} = nats_addr(),
     NonExistingPort = 4444,
-    {ok, C} = nats:connect(<<"127.0.0.1">>, NonExistingPort),
+    {ok, C} = nats:connect(Host, NonExistingPort),
     receive
         {C, {error, econnrefused}} -> ok
     after 1000 ->
@@ -117,32 +126,32 @@ connect_verbose_fail(_) ->
     end.
 
 disconnect_ok(_) ->
-    Host = <<"127.0.0.1">>,
-    Port = 4222,
+    {ok, Host, Port} = nats_addr(),
     {ok, C} = nats:connect(Host, Port, #{verbose => true}),
     ok = nats:disconnect(C),
     {error, not_found} = nats:is_ready(C).
 
 
 pub_ok(_) ->
-    {ok, C} = nats:connect(<<"127.0.0.1">>, 4222),
+    {ok, Host, Port} = nats_addr(),
+    {ok, C} = nats:connect(Host, Port),
     receive {C, ready} -> ok end,
     nats:pub(C, <<"foo.bar">>, <<"My payload">> ),
     timer:sleep(100).
 
 pub_verbose_ok(_) ->
-    {ok, C} = nats:connect(<<"127.0.0.1">>, 4222,
-                           #{verbose => true}),
+    {ok, Host, Port} = nats_addr(),
+    {ok, C} = nats:connect(Host, Port, #{verbose => true}),
     ok = nats:pub(C, <<"foo.bar">>, <<"My payload">>).
 
 pub_with_buffer_size(_) ->
-    {ok, C} = nats:connect(<<"127.0.0.1">>, 4222, #{buffer_size => 1}),
+    {ok, Host, Port} = nats_addr(),
+    {ok, C} = nats:connect(Host, Port, #{buffer_size => 1}),
     nats:pub(C, <<"foo.bar">>, <<"My payload">>),
     timer:sleep(100).
 
 sub_ok(_) ->
-    Host = <<"127.0.0.1">>,
-    Port = 4222,
+    {ok, Host, Port} = nats_addr(),
     {ok, C} = nats:connect(Host, Port),
     receive {C, ready} -> ok end,
     {ok, Sid} = nats:sub(C, <<"foo.*">>),
@@ -155,8 +164,7 @@ sub_ok(_) ->
     end.
 
 sub_verbose_ok(_) ->
-    Host = <<"127.0.0.1">>,
-    Port = 4222,
+    {ok, Host, Port} = nats_addr(),
     {ok, C} = nats:connect(Host, Port, #{verbose => true}),
     receive {C, ready} -> ok end,
 
@@ -169,8 +177,8 @@ sub_verbose_ok(_) ->
     end.
 
 unsub_verbose_ok(_) ->
-    {ok, C} = nats:connect(<<"127.0.0.1">>, 4222,
-                           #{verbose => true}),
+    {ok, Host, Port} = nats_addr(),
+    {ok, C} = nats:connect(Host, Port, #{verbose => true}),
     receive {C, ready} -> ok end,
     {ok, Sid} = nats:sub(C, <<"foo.*">>),
     nats:unsub(C, Sid),
@@ -183,8 +191,7 @@ unsub_verbose_ok(_) ->
     end.
 
 request_no_responders(_) ->
-    Host = <<"127.0.0.1">>,
-    Port = 4222,
+    {ok, Host, Port} = nats_addr(),
     {ok, C} = nats:connect(Host, Port),
     receive {C, ready} -> ok end,
 
@@ -193,8 +200,7 @@ request_no_responders(_) ->
     ok.
 
 request_verbose_no_responders(_) ->
-    Host = <<"127.0.0.1">>,
-    Port = 4222,
+    {ok, Host, Port} = nats_addr(),
     {ok, C} = nats:connect(Host, Port),
     receive {C, ready} -> ok end,
 
@@ -202,8 +208,7 @@ request_verbose_no_responders(_) ->
     ?assertEqual({error,no_responders}, Response),
     ok.
 micro_ok(_) ->
-    Host = <<"127.0.0.1">>,
-    Port = 4222,
+    {ok, Host, Port} = nats_addr(),
     {ok, C} = nats:connect(Host, Port),
     receive {C, ready} -> ok end,
 
@@ -227,8 +232,7 @@ micro_ok(_) ->
     end.
 
 micro_verbose_ok(_) ->
-    Host = <<"127.0.0.1">>,
-    Port = 4222,
+    {ok, Host, Port} = nats_addr(),
     {ok, C} = nats:connect(Host, Port, #{verbose => true}),
     receive {C, ready} -> ok end,
 
@@ -263,3 +267,7 @@ send_tcp_msg(BinHost, Port, BinMsg) ->
 
 echo(_ReplyKey, _SvcName, _Op, Payload, _, CbState) ->
     {reply, Payload, CbState}.
+
+nats_addr() ->
+    Host = ct:get_config(nats_host, ~"localhost"),
+    {ok, Host, 4222}.

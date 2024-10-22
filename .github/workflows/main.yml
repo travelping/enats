@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+    branches: [ $default-branch ]
+  release:
+    types:
+      - created
+
+jobs:
+  test:
+    name: CI
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        otp: [27.0, 27.1]
+    container:
+      image: erlang:${{ matrix.otp }}-alpine
+      options: --privileged
+    steps:
+    -
+      name: Prepare
+      run: |
+           apk update
+           apk --no-cache upgrade
+           apk --no-cache add docker git zstd iproute2 iproute2-ss
+    -
+      name: git special configs
+      run: |
+           git config --global --add safe.directory /__w/enats/enats
+    -
+      name: Check out repository
+      uses: actions/checkout@v4
+    -
+      name: Build
+      run: rebar3 compile
+    -
+      name: Run tests
+      run: |
+           docker run -d --rm --publish 172.18.0.1:4222:4222/tcp nats:latest -js
+           rebar3 xref
+           rebar3 dialyzer
+           rebar3 ct --config priv/ct-github.config
+    -
+      name: Tar Test Output
+      if: ${{ always() }}
+      run: tar -cf - _build/test/logs/ | zstd -15 -o ct-logs-${{ matrix.otp }}.tar.zst
+    -
+      name: Archive Test Output
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-output-${{ matrix.otp }}
+        path: |
+          ct-logs-${{ matrix.otp }}.tar.zst
+          _build/test/logs/*/junit_report.xml
+
+  publish-test-results:
+    name: "Publish Tests Results"
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      pull-requests: write
+      contents: read
+      issues: read
+    if: always()
+    steps:
+      -
+        name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      -
+        name: Publish Test Results
+        uses: EnricoMi/publish-unit-test-result-action@v2
+        with:
+          files: "artifacts/**/junit_report.xml"
+
+  slack:
+    needs: test
+    runs-on: ubuntu-22.04
+    if: always()
+    steps:
+    -
+      name: Slack notification
+      uses: 8398a7/action-slack@v3
+      with:
+        author_name: "GitHub Actions"
+        username: ${{ github.event.repository.name }}
+        icon_emoji: ':octocat:'
+        fields: repo, message, ref, commit, author, action, eventName, workflow, job, took
+        status: ${{ needs.test.result }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
+        MATRIX_CONTEXT: ${{ toJson(matrix) }}

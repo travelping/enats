@@ -33,6 +33,9 @@
 -define(KV_KEY_2, ~"FOO-2").
 -define(KV_KEY_DEL, ~"FOO-DEL").
 
+suite() ->
+    [{timetrap, {minutes,1}}].
+
 all() ->
     [jetstream, kv].
 
@@ -48,7 +51,8 @@ init_per_testcase(_TestCase, Config) ->
     Config.
 
 end_per_testcase(_TestCase, Config) ->
-    {ok, Con} = nats:connect(<<"127.0.0.1">>, 4222),
+    {ok, Host, Port} = nats_addr(),
+    {ok, Con} = nats:connect(Host, Port),
     receive
         {Con, ready} -> ok
     after 1000 ->
@@ -263,8 +267,13 @@ kv(_Client, Con, _Config) ->
 %%% Internal helpers
 %%%===================================================================
 
+nats_addr() ->
+    Host = ct:get_config(nats_host, ~"localhost"),
+    {ok, Host, 4222}.
+
 connect() ->
-    {ok, C} = nats:connect(<<"127.0.0.1">>, 4222, #{buffer_size => -1}),
+    {ok, Host, Port} = nats_addr(),
+    {ok, C} = nats:connect(Host, Port, #{buffer_size => -1}),
     receive {C, ready} -> C
     after 1000 ->
             ct:fail(ready_msg_not_sent)

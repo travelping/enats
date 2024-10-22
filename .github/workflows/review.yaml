@@ -1,0 +1,39 @@
+name: review
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - synchronize
+    branches:
+      - main
+      - 'stable/**'
+      - 'feature/**'
+
+jobs:
+  code-style-review:
+    runs-on: ubuntu-22.04
+    container: erlang:27.1-alpine
+    env:
+      ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      -
+        name: install dependencies
+        run: |
+          apk --no-cache -u add git emacs-nox
+      -
+        name: Check out repository
+        uses: actions/checkout@v4
+      -
+        name: format
+        run: rebar3 fmt
+      -
+        name: automated review
+        uses: googleapis/code-suggester@v4
+        with:
+          command: review
+          pull_number: ${{ github.event.pull_request.number }}
+          git_dir: '.'
+      -
+        name: check
+        run: git diff --quiet --exit-code

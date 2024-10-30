@@ -34,7 +34,7 @@
 -behaviour(gen_statem).
 
 %% API
--export([start/5, stop/1]).
+-export([start/6, stop/1]).
 
 %% gen_statem callbacks
 -export([callback_mode/0, init/1, terminate/3, code_change/4]).
@@ -49,15 +49,18 @@
 -record(data, {owner, subj_pre, conn, watch, sid, cb, cb_state, init_cnt,
                ignore_deletes}).
 
+-define(VALID_KEYS(Keys), (is_binary(Keys) orelse (is_list(Keys) andalso length(Keys) > 0))).
+
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-start(Conn, Bucket, #{owner := Pid} = WatchOpts, Opts, StartOpts)
-  when is_pid(Pid) ->
-    gen_statem:start(?MODULE, [Conn, Bucket, WatchOpts, Opts], StartOpts);
-start(Conn, Bucket, WatchOpts, Opts, StartOpts) ->
-    gen_statem:start(?MODULE, [Conn, Bucket, WatchOpts#{owner => self()}, Opts], StartOpts).
+start(Conn, Bucket, Keys, #{owner := Pid} = WatchOpts, Opts, StartOpts)
+  when is_pid(Pid) andalso ?VALID_KEYS(Keys) ->
+    gen_statem:start(?MODULE, [Conn, Bucket, Keys, WatchOpts, Opts], StartOpts);
+start(Conn, Bucket, Keys, WatchOpts, Opts, StartOpts)
+  when ?VALID_KEYS(Keys) ->
+    gen_statem:start(?MODULE, [Conn, Bucket, Keys, WatchOpts#{owner => self()}, Opts], StartOpts).
 
 stop(Watch) ->
     gen_statem:stop(Watch).
@@ -68,7 +71,7 @@ stop(Watch) ->
 
 callback_mode() -> [handle_event_function, state_enter].
 
-init([Conn, Bucket, #{owner := Owner} = WatchOpts, Opts]) ->
+init([Conn, Bucket, Keys, #{owner := Owner} = WatchOpts, Opts]) ->
     process_flag(trap_exit, true),
 
     %% use a ephemeral consumer
@@ -101,56 +104,52 @@ init([Conn, Bucket, #{owner := Owner} = WatchOpts, Opts]) ->
 
     DeliverSubject =  <<"_INBOX.", (nats:rnd_topic_id())/binary>>,
     {ok, Sid} = nats:sub(Conn, DeliverSubject),
-    WatchConfig =
-        #{config =>
-              #{deliver_policy => last_per_subject,
-                ack_policy => none,
-                ack_wait => 79200000000000,
-                max_deliver => 1,
-                filter_subject => ?SUBJECT_NAME(Bucket, ~">"),
-                replay_policy => instant,
-                flow_control => true,
-                idle_heartbeat => 5000000000,
-                headers_only => true,
-                deliver_subject => DeliverSubject,
-                num_replicas => 1,
-                mem_storage => true
-               }
+    WatchConfig0 =
+        #{deliver_policy => last_per_subject,
+          ack_policy => none,
+          ack_wait => 79200000000000,
+          max_deliver => 1,
+          replay_policy => instant,
+          flow_control => true,
+          idle_heartbeat => 5000000000,
+          headers_only => true,
+          deliver_subject => DeliverSubject,
+          num_replicas => 1,
+          mem_storage => true
          },
-    ?LOG(debug, "Sid: ~p~nSubj: ~p~n", [Sid, DeliverSubject]),
-    {ok, Watch} = nats_consumer:create(Conn, ?BUCKET_NAME(Bucket), WatchConfig, Opts),
+    WatchConfig = filter_jubjects(Bucket, Keys, WatchConfig0),
 
-    Data = #data{
+    ?LOG(debug, "Sid: ~p~nSubj: ~p~nWatchConfig: ~p~n", [Sid, DeliverSubject, WatchConfig]),
+    {ok, Watch} =
+        nats_consumer:create(Conn, ?BUCKET_NAME(Bucket), #{config => WatchConfig}, Opts),
+
+    Cb = maps:get(cb, WatchOpts, fun default_cb/3),
+    InitCnt = maps:get(num_pending, Watch, 0),
+    Data0 = #data{
               owner = Owner,
               subj_pre = ?SUBJECT_NAME(Bucket, <<>>),
               conn = Conn,
               watch = Watch,
               sid = Sid,
-              cb = maps:get(cb, WatchOpts, fun default_cb/3),
-              cb_state = undefined,
-
-              ignore_deletes = maps:get(ignore_deletes, WatchOpts, false)
+              cb = Cb,
+              ignore_deletes = maps:get(ignore_deletes, WatchOpts, false),
+              init_cnt = InitCnt
              },
 
-    case maps:get(num_pending, Watch, 0) of
-        InitCnt when InitCnt > 0 ->
-            {ok, init, Data#data{init_cnt = InitCnt}};
-        InitCnt ->
-            {ok, watching, Data#data{init_cnt = InitCnt}}
+    case Cb({init, Owner}, Conn, InitCnt) of
+        {continue, CbState} ->
+            Data = Data0#data{cb_state = CbState},
+            State = if InitCnt > 0 -> init;
+                       true        -> watching
+                    end,
+            {ok, State, Data};
+        {stop, Reason} ->
+            {stop, Reason}
     end.
 
 handle_event(enter, _, watching, #data{conn = Conn,
                                        cb = Cb, cb_state = CbStateIn} = Data) ->
     case Cb(init_done, Conn, CbStateIn) of
-        {continue, CbStateOut} ->
-            {keep_state, Data#data{cb_state = CbStateOut}};
-        {stop, Reason} ->
-            {stop, Reason}
-    end;
-
-handle_event(enter, init, init,
-             #data{owner = Owner, conn = Conn, cb = Cb, cb_state = CbStateIn} = Data) ->
-    case Cb({init, Owner}, Conn, CbStateIn) of
         {continue, CbStateOut} ->
             {keep_state, Data#data{cb_state = CbStateOut}};
         {stop, Reason} ->
@@ -199,6 +198,13 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+filter_jubjects(Bucket, Key, WatchConfig)
+  when is_binary(Key) ->
+    WatchConfig#{filter_subject => ?SUBJECT_NAME(Bucket, Key)};
+filter_jubjects(Bucket, Keys, WatchConfig)
+  when is_list(Keys) ->
+    WatchConfig#{filter_subjects => [?SUBJECT_NAME(Bucket, Key) || Key <- Keys]}.
 
 parse_msg({msg, Subject, Value, Opts}, #data{subj_pre = Pre}) ->
     Key = case Subject of

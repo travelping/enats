@@ -40,7 +40,9 @@
 
 %% K/V store API
 -export([
-         watch/4,
+         watch/5, watch/6,
+         watch_all/4, watch_all/5,
+         select_keys/4, select_keys/5,
          list_keys/3, list_keys/4,
          get/3, get/4, get/5, get_msg/4,
          put/4,
@@ -197,13 +199,54 @@ data, not the entry value.
 - ResumeFromRevision instructs the key watcher to resume from a
 specific revision number.
 """.
-watch(Conn, Bucket, WatchOpts, Opts)
+watch(Conn, Bucket, Keys, WatchOpts, Opts)
   when is_binary(Bucket), is_map(WatchOpts), is_map(Opts) ->
-    watch(Conn, Bucket, WatchOpts, Opts, [{spawn_opt, [link]}]).
+    watch(Conn, Bucket, Keys, WatchOpts, Opts, [{spawn_opt, [link]}]).
 
-watch(Conn, Bucket, WatchOpts, Opts, StartOpts)
+watch(Conn, Bucket, Keys, WatchOpts, Opts, StartOpts)
   when is_binary(Bucket), is_map(WatchOpts), is_map(Opts) ->
-    nats_kv_watch:start(Conn, Bucket, WatchOpts, Opts, StartOpts).
+    nats_kv_watch:start(Conn, Bucket, Keys, WatchOpts, Opts, StartOpts).
+
+-doc """
+WatchAll will invoke the callback for all updates.
+""".
+watch_all(Conn, Bucket, WatchOpts, Opts)
+  when is_binary(Bucket), is_map(WatchOpts), is_map(Opts) ->
+    watch(Conn, Bucket, ~">", WatchOpts, Opts, [{spawn_opt, [link]}]).
+
+watch_all(Conn, Bucket, WatchOpts, Opts, StartOpts)
+  when is_binary(Bucket), is_map(WatchOpts), is_map(Opts) ->
+    nats_kv_watch:start(Conn, Bucket, ~">", WatchOpts, Opts, StartOpts).
+
+-doc """
+SekectKeys will return KeyLister, allowing to retrieve selected keys from
+the key value store in a streaming fashion (on a channel).
+""".
+select_keys(Conn, Bucket, Keys, WatchOpts) ->
+    select_keys(Conn, Bucket, Keys, WatchOpts, #{}).
+
+select_keys(Conn, Bucket, Keys, WatchOpts0, Opts) ->
+    WatchOpts = WatchOpts0#{ignore_deletes => true,
+                            cb => fun select_keys_watch_cb/3},
+    {ok, Pid} = watch(Conn, Bucket, Keys, WatchOpts, Opts),
+    select_keys_loop(Pid, []).
+
+select_keys_watch_cb({init, Owner}, _Conn, _) ->
+    {continue, Owner};
+select_keys_watch_cb(init_done, _Conn, Owner) ->
+    Owner ! {done, self()},
+    {stop, normal};
+select_keys_watch_cb({msg, _, _, _} = Msg, _Conn, Owner) ->
+    Owner ! {'WATCH', self(), Msg},
+    {continue, Owner}.
+
+select_keys_loop(Pid, Acc) ->
+    receive
+        {done, Pid} ->
+            {ok, lists:reverse(Acc)};
+        {'WATCH', Pid, {msg, Key, _Value, _Opts}} ->
+            select_keys_loop(Pid, [Key | Acc])
+    end.
 
 -doc """
 ListKeys will return KeyLister, allowing to retrieve all keys from
@@ -212,28 +255,8 @@ the key value store in a streaming fashion (on a channel).
 list_keys(Conn, Bucket, WatchOpts) ->
     list_keys(Conn, Bucket, WatchOpts, #{}).
 
-list_keys(Conn, Bucket, WatchOpts0, Opts) ->
-    WatchOpts = WatchOpts0#{ignore_deletes => true,
-                            cb => fun list_keys_watch_cb/3},
-    {ok, Pid} = watch(Conn, Bucket, WatchOpts, Opts),
-    list_keys_loop(Pid, []).
-
-list_keys_watch_cb({init, Owner}, _Conn, _) ->
-    {continue, Owner};
-list_keys_watch_cb(init_done, _Conn, Owner) ->
-    Owner ! {done, self()},
-    {stop, normal};
-list_keys_watch_cb({msg, _, _, _} = Msg, _Conn, Owner) ->
-    Owner ! {'WATCH', self(), Msg},
-    {continue, Owner}.
-
-list_keys_loop(Pid, Acc) ->
-    receive
-        {done, Pid} ->
-            {ok, lists:reverse(Acc)};
-        {'WATCH', Pid, {msg, Key, _Value, _Opts}} ->
-            list_keys_loop(Pid, [Key | Acc])
-    end.
+list_keys(Conn, Bucket, WatchOpts, Opts) ->
+    select_keys(Conn, Bucket, ~">", WatchOpts, Opts).
 
 -doc """
 Get returns the latest value for the key. If the key does not exist,
@@ -365,7 +388,7 @@ or a watch on the key. [Delete] is a non-destructive operation and
 will not remove any previous revisions from the underlying stream.
 
 [LastRevision] option can be specified to only perform delete if the
-                                                                 latest revision the provided one.
+latest revision the provided one.
 """.
 delete(Conn, Bucket, Key) ->
     delete(Conn, Bucket, Key, #{}).
@@ -401,7 +424,7 @@ Unlike [Delete], Purge is a destructive operation and will remove all
 previous revisions from the underlying streams.
 
 [LastRevision] option can be specified to only perform purge if the
-                                                                latest revision the provided one.
+latest revision the provided one.
 """.
 purge(Conn, Bucket, Key) ->
     purge(Conn, Bucket, Key, #{}).

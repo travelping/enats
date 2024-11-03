@@ -34,7 +34,7 @@
 -behaviour(gen_statem).
 
 %% API
--export([start/6, stop/1]).
+-export([start/6, stop/1, done/1]).
 
 %% gen_statem callbacks
 -export([callback_mode/0, init/1, terminate/3, code_change/4]).
@@ -64,6 +64,12 @@ start(Conn, Bucket, Keys, WatchOpts, Opts, StartOpts)
 
 stop(Watch) ->
     gen_statem:stop(Watch).
+
+done(Pid) ->
+    unlink(Pid),
+    receive {'EXIT', Pid, _} -> true
+    after 0 -> true
+    end.
 
 %%%===================================================================
 %%% gen_statem callbacks

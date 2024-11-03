@@ -243,6 +243,7 @@ select_keys_watch_cb({msg, _, _, _} = Msg, _Conn, Owner) ->
 select_keys_loop(Pid, Acc) ->
     receive
         {done, Pid} ->
+            nats_kv_watch:done(Pid),
             {ok, lists:reverse(Acc)};
         {'WATCH', Pid, {msg, Key, _Value, _Opts}} ->
             select_keys_loop(Pid, [Key | Acc])

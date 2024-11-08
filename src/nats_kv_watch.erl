@@ -118,7 +118,7 @@ init([Conn, Bucket, Keys, #{owner := Owner} = WatchOpts, Opts]) ->
           replay_policy => instant,
           flow_control => true,
           idle_heartbeat => 5000000000,
-          headers_only => true,
+          headers_only => maps:get(headers_only, WatchOpts, true),
           deliver_subject => DeliverSubject,
           num_replicas => 1,
           mem_storage => true

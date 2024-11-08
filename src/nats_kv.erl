@@ -245,8 +245,10 @@ select_keys_loop(Pid, Acc) ->
         {done, Pid} ->
             nats_kv_watch:done(Pid),
             {ok, lists:reverse(Acc)};
-        {'WATCH', Pid, {msg, Key, _Value, _Opts}} ->
-            select_keys_loop(Pid, [Key | Acc])
+        {'WATCH', Pid, {msg, Key, <<>>, _Opts}} ->
+            select_keys_loop(Pid, [Key | Acc]);
+        {'WATCH', Pid, {msg, Key, Value, _Opts}} ->
+            select_keys_loop(Pid, [{Key, Value} | Acc])
     end.
 
 -doc """
@@ -358,7 +360,12 @@ create(Conn, Bucket, Key, Value, Opts)
             case get(Conn, Bucket, Key, last, Opts) of
                 {deleted, #{message := #{seq := LastRev}}}->
                     update(Conn, Bucket, Key, Value, LastRev);
-                _ ->
+                {ok, #{message := OldObj}}
+                  when is_map_key(return_existing, Opts) andalso
+                       map_get(return_existing, Opts) =:= true ->
+                    {error, {exists, OldObj}};
+                _Err ->
+                    ct:pal("Exists-#2: ~p", [_Err]),
                     {error, exists}
             end;
         {error, _} = Error ->

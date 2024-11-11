@@ -988,11 +988,11 @@ flush_batch(Data0) ->
 
 client_info(#{server_info := ServerInfo} = Data) ->
     %% Include user and name iff the server requires it
-    FieldsList = [verbose, pedantic, tls_required, auth_token, name, lang,
+    FieldsList = [verbose, pedantic, tls_required, name, lang,
                   version, headers, no_responders],
     NewFieldsList =
         case maps:get(auth_required, ServerInfo, false) of
-            true -> [user, pass | FieldsList];
+            true -> [user, pass, auth_token | FieldsList];
             _ -> FieldsList
         end,
     Nats = maps:with(NewFieldsList, Data),

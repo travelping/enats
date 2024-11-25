@@ -1,0 +1,19 @@
+{"1.2.0",
+[{<<"enats">>,
+  {git,"https://github.com/travelping/enats.git",
+       {ref,"f705d977ff74127b1951148e087576cdb414e4fc"}},
+  0},
+ {<<"enats_msg">>,
+  {git,"https://github.com/travelping/enats_msg.git",
+       {ref,"e970a857600797982b8c8274fef244db7fd85b3c"}},
+  1},
+ {<<"otp_vsn">>,{pkg,<<"otp_vsn">>,<<"2.3.1">>},1},
+ {<<"plists">>,{pkg,<<"plists">>,<<"1.1.1">>},0}]}.
+[
+{pkg_hash,[
+ {<<"otp_vsn">>, <<"6A4FD5CF74DAB2A2A115B0C308B4A0560C0F76BBB81D83C1EA158895463DF63C">>},
+ {<<"plists">>, <<"555D995D8E0511458BFF02289CE12D504CA409D44B24EC9DC2B6DF1E0001C35A">>}]},
+{pkg_hash_ext,[
+ {<<"otp_vsn">>, <<"07A9A37BFDB1116E8CF963C8BF59EAA4BBD6E2F09DEB46504ED9B4996171D7A7">>},
+ {<<"plists">>, <<"4E1E1FEAB852BF974430D79FF4E66B5DEB25BF80D834ECE27C566B45D8CECD2D">>}]}
+].

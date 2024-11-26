@@ -35,7 +35,7 @@
          get/2, get/3,
          update/3,
          delete/2, delete/3,
-         purge/2, purge/3,
+         purge/2, purge/3, purge/4,
          list/1, list/2, list/3,
          names/1, names/2, names/3,
          msg_get/3, msg_get/4,
@@ -245,12 +245,20 @@ delete(Conn, Name, Opts) ->
             Other
     end.
 
-purge(Conn, Name) ->
+purge(Conn, Name)
+  when is_binary(Name) ->
     purge(Conn, Name, #{}).
 
-purge(Conn, Name, Opts) ->
+purge(Conn, Name, Opts0)
+  when is_binary(Name), is_map(Opts0) ->
+    Msg = maps:with([filter, seq, keep], Opts0),
+    Opts = maps:without([filter, seq, keep], Opts0),
+    purge(Conn, Name, Msg, Opts).
+
+purge(Conn, Name, Msg, Opts)
+  when is_binary(Name), is_map(Msg), is_map(Opts) ->
     Topic = make_js_api_topic(~"PURGE", Name, Opts),
-    case nats:request(Conn, Topic, <<>>, #{}) of
+    case nats:request(Conn, Topic, json_encode(Msg), #{}) of
         {ok, Response} ->
             unmarshal_response(?JS_API_V1_STREAM_PURGE_RESPONSE, Response);
         Other ->

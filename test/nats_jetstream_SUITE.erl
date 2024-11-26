@@ -256,6 +256,14 @@ kv(_Client, Con, _Config) ->
     ct:pal("KvPurgeR2: ~p", [KvPurgeR2]),
     ?assertMatch({ok, #{stream := _, seq := _}}, KvPurgeR2),
 
+    {deleted, _} = nats_kv:get(Con, ?KV_BUCKET, ?KV_KEY_2, BucketCfg),
+
+    {ok, #{success := true, purged := 1}} =
+        nats_stream:purge(Con, <<"KV_", ?KV_BUCKET/binary>>,
+                          #{filter => <<"$KV.", ?KV_BUCKET/binary, $., ?KV_KEY_2/binary>>}, #{}),
+
+    {error, #{code := 404}} = nats_kv:get(Con, ?KV_BUCKET, ?KV_KEY_2, BucketCfg),
+
     BucketDeleteR1 = nats_kv:delete_bucket(Con, ?KV_BUCKET),
     ct:pal("R1: ~p", [BucketDeleteR1]),
     ?assertMatch({ok, #{success := true}}, BucketDeleteR1),

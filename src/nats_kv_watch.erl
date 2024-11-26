@@ -123,7 +123,7 @@ init([Conn, Bucket, Keys, #{owner := Owner} = WatchOpts, Opts]) ->
           num_replicas => 1,
           mem_storage => true
          },
-    WatchConfig = filter_jubjects(Bucket, Keys, WatchConfig0),
+    WatchConfig = filter_subjects(Bucket, Keys, WatchConfig0),
 
     ?LOG(debug, "Sid: ~p~nSubj: ~p~nWatchConfig: ~p~n", [Sid, DeliverSubject, WatchConfig]),
     {ok, Watch} =
@@ -165,10 +165,28 @@ handle_event(enter, _, watching, #data{conn = Conn,
 handle_event(enter, _, _, _Data) ->
     keep_state_and_data;
 
-handle_event(info, {Conn, Sid, Msg0}, State,
-             #data{conn = Conn, sid = Sid,
-                   cb = Cb, cb_state = CbStateIn, init_cnt = InitCnt} = Data) ->
-    Msg = {msg, _, _, MsgOpts} = parse_msg(Msg0, Data),
+handle_event(info, {Conn, Sid, Msg0}, State, #data{conn = Conn, sid = Sid} = Data) ->
+    Msg = parse_msg(Msg0, Data),
+    handle_message(Msg, State, Data).
+
+terminate(_Reason, _State,
+          #data{conn = Conn,
+                watch = #{config := #{deliver_subject := DeliverSubject}} = Watch}) ->
+    nats:unsub(Conn, DeliverSubject),
+    nats_consumer:delete(Conn, Watch),
+    ok.
+
+code_change(_OldVsn, State, Data, _Extra) ->
+    {ok, State, Data}.
+
+handle_message({msg, _, _, #{status := 100, reply_to := ReplyTo}} = _Msg,
+               _State, #data{conn = Conn}) ->
+    %% FlowControl Request
+    nats:pub(Conn, ReplyTo),
+    keep_state_and_data;
+handle_message({msg, _, _, MsgOpts} = Msg,
+               State,
+               #data{conn = Conn, cb = Cb, cb_state = CbStateIn, init_cnt = InitCnt} = Data) ->
     Headers = maps:get(header, MsgOpts, []),
     KvOp = proplists:get_value(?KV_OP, Headers, none),
 
@@ -191,24 +209,14 @@ handle_event(info, {Conn, Sid, Msg0}, State,
             {stop, Reason}
     end.
 
-terminate(_Reason, _State,
-          #data{conn = Conn,
-                watch = #{config := #{deliver_subject := DeliverSubject}} = Watch}) ->
-    nats:unsub(Conn, DeliverSubject),
-    nats_consumer:delete(Conn, Watch),
-    ok.
-
-code_change(_OldVsn, State, Data, _Extra) ->
-    {ok, State, Data}.
-
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
 
-filter_jubjects(Bucket, Key, WatchConfig)
+filter_subjects(Bucket, Key, WatchConfig)
   when is_binary(Key) ->
     WatchConfig#{filter_subject => ?SUBJECT_NAME(Bucket, Key)};
-filter_jubjects(Bucket, Keys, WatchConfig)
+filter_subjects(Bucket, Keys, WatchConfig)
   when is_list(Keys) ->
     WatchConfig#{filter_subjects => [?SUBJECT_NAME(Bucket, Key) || Key <- Keys]}.
 
@@ -222,6 +230,15 @@ parse_msg({msg, Subject, Value, Opts}, #data{subj_pre = Pre}) ->
 parse_opts(#{header := <<"NATS/1.0\r\n", HdrStr/binary>>} = Opts) ->
     Header = nats_hd:parse_headers(HdrStr),
     Opts#{header := Header};
+parse_opts(#{header := <<"NATS/1.0 ", Status:3/bytes, Rest/binary>>} = Opts0) ->
+    Opts = Opts0#{status => binary_to_integer(Status), header := []},
+    case binary:split(Rest, ~"\r\n") of
+        [_, More] ->
+            Header = nats_hd:parse_headers(More),
+            Opts#{header := Header};
+        _Other ->
+            Opts
+    end;
 parse_opts(Opts) ->
     Opts.
 

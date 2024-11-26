@@ -194,13 +194,8 @@ get(Conn, Name, Opts) ->
     get(Conn, Name, maps:without(?MSG_GET_REQUEST_FIELDS, Opts), maps:with(?API_OPTS, Opts)).
 
 get(Conn, Name, Request, Opts) ->
-    ReqBin = if map_size(Request) =:= 0 ->
-                     <<>>;
-                true ->
-                     json:encode(Request)
-             end,
     Topic = make_js_api_topic(~"INFO", Name, Opts),
-    case nats:request(Conn, Topic, ReqBin, #{}) of
+    case nats:request(Conn, Topic, json_encode(Request), #{}) of
         {ok, Response} ->
             unmarshal_response(?JS_API_V1_STREAM_INFO_RESPONSE, Response);
         Other ->
@@ -271,12 +266,7 @@ list(Conn, Opts) ->
 
 list(Conn, Request, Opts) ->
     Topic = make_js_api_topic(~"LIST", Opts),
-    BinReq = if map_size(Request) =:= 0 ->
-                     <<>>;
-                true ->
-                     json:encode(Request)
-             end,
-    case nats:request(Conn, Topic, BinReq, #{}) of
+    case nats:request(Conn, Topic, json_encode(Request), #{}) of
         {ok, Response} ->
             unmarshal_response(?JS_API_V1_STREAM_LIST_RESPONSE, Response);
         Other ->
@@ -292,12 +282,7 @@ names(Conn, Opts) ->
 
 names(Conn, Request, Opts) ->
     Topic = make_js_api_topic(~"NAMES", Opts),
-    BinReq = if map_size(Request) =:= 0 ->
-                     <<>>;
-                true ->
-                     json:encode(Request)
-             end,
-    case nats:request(Conn, Topic, BinReq, #{}) of
+    case nats:request(Conn, Topic, json_encode(Request), #{}) of
         {ok, Response} ->
             unmarshal_response(?JS_API_V1_STREAM_NAMES_RESPONSE, Response);
         Other ->
@@ -313,7 +298,7 @@ msg_get(Conn, Name, Subject) when is_binary(Subject) ->
 msg_get(Conn, Name, Msg, Opts)
   when is_map(Msg), is_map(Opts) ->
     Topic = make_js_api_topic(~"MSG.GET", Name, Opts),
-    case nats:request(Conn, Topic, json:encode(Msg), #{}) of
+    case nats:request(Conn, Topic, json_encode(Msg), #{}) of
         {ok, Response} ->
             unmarshal_response(?JS_API_V1_STREAM_MSG_GET_RESPONSE, Response);
         Other ->
@@ -335,10 +320,7 @@ msg_delete(Conn, Name, SeqNo, NoErase)
 msg_delete(Conn, Name, Msg, Opts)
   when is_map(Msg), is_map(Opts) ->
     Topic = make_js_api_topic(~"MSG.DELETE", Name, Opts),
-    BinMsg = if map_size(Msg) =:= 0 -> <<>>;
-                true -> json:encode(Msg)
-             end,
-    case nats:request(Conn, Topic, BinMsg, #{}) of
+    case nats:request(Conn, Topic, json_encode(Msg), #{}) of
         {ok, Response} ->
             unmarshal_response(?JS_API_V1_STREAM_MSG_DELETE_RESPONSE, Response);
         Other ->
@@ -377,6 +359,12 @@ json_object_push(Key, Value, Acc)
     [{binary_to_atom(Key), TS} | Acc];
 json_object_push(Key, Value, Acc) ->
     [{to_atom(Key), Value} | Acc].
+
+json_encode(Msg)
+  when map_size(Msg) =:= 0 ->
+    <<>>;
+json_encode(Msg) ->
+    json:encode(Msg).
 
 init_decoders(_) ->
     #{object_push => fun json_object_push/3}.

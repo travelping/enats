@@ -184,6 +184,26 @@ handle_message({msg, _, _, #{status := 100, reply_to := ReplyTo}} = _Msg,
     %% FlowControl Request
     nats:pub(Conn, ReplyTo),
     keep_state_and_data;
+handle_message({msg, _, <<>>,
+                #{status := 100, description := <<"Idle", _/binary>>,
+                  header := _Header} = Opts} = _Msg,
+               _State, #data{conn = _Conn})
+  when not is_map_key(reply_to, Opts) ->
+    ?LOG(critical, "HeartBeat Message: ~0p", [_Msg]),
+    keep_state_and_data;
+handle_message({msg, _, <<>>,
+                #{status := 100, description := <<"Flow", _/binary>>,
+                  header := _Header} = Opts} = _Msg,
+               _State, #data{conn = _Conn})
+  when not is_map_key(reply_to, Opts) ->
+    ?LOG(critical, "Flow control Message: ~0p", [_Msg]),
+    keep_state_and_data;
+handle_message({msg, _, <<>>, #{status := 100, header := _Header} = Opts} = _Msg,
+               _State, _Data)
+  when not is_map_key(reply_to, Opts) ->
+    ?LOG(critical, "unexpected control Message: ~0p", [_Msg]),
+    keep_state_and_data;
+
 handle_message({msg, _, _, MsgOpts} = Msg,
                State,
                #data{conn = Conn, cb = Cb, cb_state = CbStateIn, init_cnt = InitCnt} = Data) ->
@@ -231,13 +251,14 @@ parse_opts(#{header := <<"NATS/1.0\r\n", HdrStr/binary>>} = Opts) ->
     Header = nats_hd:parse_headers(HdrStr),
     Opts#{header := Header};
 parse_opts(#{header := <<"NATS/1.0 ", Status:3/bytes, Rest/binary>>} = Opts0) ->
-    Opts = Opts0#{status => binary_to_integer(Status), header := []},
+    Opts = Opts0#{status => binary_to_integer(Status),
+                  header := []},
     case binary:split(Rest, ~"\r\n") of
-        [_, More] ->
+        [Description, More] ->
             Header = nats_hd:parse_headers(More),
-            Opts#{header := Header};
+            Opts#{description => string:trim(Description), header := Header};
         _Other ->
-            Opts
+            Opts#{description => string:trim(Rest)}
     end;
 parse_opts(Opts) ->
     Opts.

@@ -353,7 +353,10 @@ equal signs, and dots.
 create(Conn, Bucket, Key, Value) ->
     create(Conn, Bucket, Key, Value, #{}).
 
-create(Conn, Bucket, Key, Value, Opts)
+create(Conn, Bucket, Key, Value, Opts) ->
+    create_do(Conn, Bucket, Key, Value, maps:merge(#{retry => true}, Opts)).
+
+create_do(Conn, Bucket, Key, Value, #{retry := Retry} = Opts)
   when is_binary(Bucket), is_binary(Key) ->
     case update(Conn, Bucket, Key, Value, 0) of
         {error, #{err_code := ?JS_ERR_CODE_STREAM_WRONG_LAST_SEQUENCE}} ->
@@ -364,8 +367,12 @@ create(Conn, Bucket, Key, Value, Opts)
                   when is_map_key(return_existing, Opts) andalso
                        map_get(return_existing, Opts) =:= true ->
                     {error, {exists, OldObj}};
-                _Err ->
-                    ct:pal("Exists-#2: ~p", [_Err]),
+                {error, #{err_code := ?JS_ERR_CODE_MESSAGE_NOT_FOUND}}
+                  when Retry ->
+                    %% race between us and stream purge on the message, retry
+                    create_do(Conn, Bucket, Key, Value, Opts#{retry := false});
+                Other ->
+                    ?LOG(error, "key '~0p' already exists: ~0p", [Key, Other]),
                     {error, exists}
             end;
         {error, _} = Error ->
@@ -588,5 +595,5 @@ prepare_key_value_config(#{bucket := Bucket} = Config)
          },
     maps:merge(StreamCfg,
                maps:with([description, histroy, max_bytes, storage,
-                          replicas, placement, republish], Config)).
+                          replicas, placement, republish, deny_delete], Config)).
 %% TBD: mirror and sources configuration

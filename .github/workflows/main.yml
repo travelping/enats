@@ -24,7 +24,7 @@ jobs:
       run: |
            apk update
            apk --no-cache upgrade
-           apk --no-cache add docker git zstd iproute2 iproute2-ss
+           apk --no-cache add docker git zstd iproute2 iproute2-ss make gcc libc-dev
     -
       name: git special configs
       run: |

@@ -91,6 +91,7 @@
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
+-include_lib("opentelemetry_api/include/otel_tracer.hrl").
 
 -type socket_opts() :: #{netns => string(),
                          netdev => binary(),
@@ -215,18 +216,24 @@ pub(Server, Subject, Payload) ->
     pub(Server, Subject, Payload, #{}).
 
 pub(Server, Subject, Payload, Opts) ->
-    gen_statem:call(Server, {pub, Subject, Payload, Opts}).
+    call_with_ctx(
+      ~"nats: pub", #{},
+      Server, {pub, Subject, Payload, Opts}).
 
 sub(Server, Subject) ->
     sub(Server, Subject, #{}).
 
 sub(Server, Subject, Opts) ->
-    gen_statem:call(Server, {sub, Subject, self(), Opts}).
+    call_with_ctx(
+      ~"nats: sub", #{},
+      Server, {sub, Subject, self(), Opts}).
 
 unsub(Server, SRef) ->
     unsub(Server, SRef, #{}).
 unsub(Server, SRef, Opts) ->
-    gen_statem:call(Server, {unsub, SRef, Opts}).
+    call_with_ctx(
+      ~"nats: unsub", #{},
+      Server, {unsub, SRef, Opts}).
 
 %% request(Server, Subject, Payload, Opts) ->
 %%     gen_statem:call(Server, {request, Subject, Payload, Opts}).
@@ -234,7 +241,11 @@ unsub(Server, SRef, Opts) ->
 request(Server, Subject, Payload, Opts) ->
     maybe
         {ok, Inbox} ?= gen_statem:call(Server, get_inbox_topic),
-        try gen_statem:call(Server, {request, Subject, Inbox, Payload, Opts}) of
+        try
+            call_with_ctx(
+              ~"nats: request", #{},
+              Server, {request, Subject, Inbox, Payload, Opts})
+        of
             {ok, {_, #{header := <<"NATS/1.0 503\r\n", _/binary>>}}} ->
                 {error, no_responders};
             Reply ->
@@ -425,6 +436,15 @@ handle_event(info, {'DOWN', _MRef, process, Owner, normal}, _, Data) ->
     lists:foreach(fun(X) -> del_sid(X, Data) end, Sids),
     true = length(Sids) =:= del_owner_subs(Owner, Data),
     keep_state_and_data;
+
+handle_event(EventType, {with_ctx, Ctx, SpanCtx, Msg}, State, Data) ->
+    Ctx1 = otel_tracer:set_current_span(Ctx, SpanCtx),
+    Token = otel_ctx:attach(Ctx1),
+    try handle_event(EventType, Msg, State, Data)
+    after
+        _ = otel_span:end_span(SpanCtx),
+        otel_ctx:detach(Token)
+    end;
 
 handle_event({call, _From}, _, State, _Data)
   when State =:= connecting; State =:= connected  ->
@@ -676,15 +696,23 @@ handle_nats_msg({info, Payload} = Msg, {connected, Data}) ->
 handle_nats_msg({msg, {Subject, NatsSid, ReplyTo, Payload}} = Msg, {State, _} = DecState)
   when is_record(State, ready) ->
     ?LOG(debug, "got msg: ~p", [Msg]),
-    Opts = reply_opt(ReplyTo, #{}),
-    handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, DecState);
+    ?with_span(
+       ~"nats: msg", #{},
+       fun (_) ->
+               Opts = reply_opt(ReplyTo, #{}),
+               handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, DecState)
+       end);
 
 handle_nats_msg({hmsg, {Subject, NatsSid, ReplyTo, Header, Payload}} = Msg,
                 {State, _} = DecState)
   when is_record(State, ready) ->
     ?LOG(debug, "got msg: ~p", [Msg]),
-    Opts = reply_opt(ReplyTo, #{header => Header}),
-    handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, DecState);
+    ?with_span(
+       ~"nats: hmsg", #{},
+       fun (_) ->
+               Opts = reply_opt(ReplyTo, #{header => Header}),
+               handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, DecState)
+       end);
 handle_nats_msg(Msg, DecState) ->
     ?LOG(debug, "NATS Msg: ~p", [Msg]),
     {continue, DecState}.
@@ -1291,3 +1319,8 @@ notify_fun(Owner, _) ->
             Resp = {msg, Subject, Payload, MsgOpts},
             Owner ! {Self, Sid, Resp}
     end.
+
+call_with_ctx(Name, Opts, ServerRef, Request) ->
+    SpanCtx = ?start_span(Name, Opts),
+    Ctx = otel_ctx:get_current(),
+    gen_statem:call(ServerRef, {with_ctx, Ctx, SpanCtx, Request}).

@@ -39,6 +39,7 @@ all() ->
      pub_with_buffer_size,
      sub_ok,
      sub_verbose_ok,
+     sub_notify_ok,
      unsub_verbose_ok,
      request_no_responders,
      micro_ok,
@@ -172,6 +173,26 @@ sub_verbose_ok(_) ->
     send_tcp_msg(Host, Port, <<"PUB foo.bar 0\r\n\r\n">>),
     receive
         {C, Sid, {msg, <<"foo.bar">>, <<>>, _}} -> ok
+    after 1000 ->
+            throw(did_not_receive_a_msg)
+    end.
+
+sub_notify_ok(_) ->
+    Self = self(),
+    Ref = make_ref(),
+    Notify =
+        fun(Sid, Subject, Payload, MsgOpts) ->
+                Self ! {Ref, Sid, Subject, Payload, MsgOpts}
+        end,
+
+    {ok, Host, Port} = nats_addr(),
+    {ok, C} = nats:connect(Host, Port),
+    receive {C, ready} -> ok end,
+    {ok, Sid} = nats:sub(C, <<"foo.*">>, #{notify => Notify}),
+    timer:sleep(100),
+    send_tcp_msg(Host, Port, <<"PUB foo.bar 0\r\n\r\n">>),
+    receive
+        {Ref, Sid, <<"foo.bar">>, <<>>, _} -> ok
     after 1000 ->
             throw(did_not_receive_a_msg)
     end.

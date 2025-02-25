@@ -223,7 +223,9 @@ handle_message({msg, _, _, MsgOpts} = Msg,
                     {keep_state, Data#data{cb_state = CbStateOut, init_cnt = Cnt - 1}};
                 {init, 1} ->
                     {next_state, watching, Data#data{cb_state = CbStateOut,
-                                                     init_cnt = undefined}}
+                                                     init_cnt = undefined}};
+                {watching, _} ->
+                    {keep_state, Data#data{cb_state = CbStateOut}}
             end;
         {stop, Reason} ->
             {stop, Reason}

@@ -595,5 +595,6 @@ prepare_key_value_config(#{bucket := Bucket} = Config)
          },
     maps:merge(StreamCfg,
                maps:with([description, histroy, max_bytes, storage,
-                          replicas, placement, republish, deny_delete], Config)).
+                          replicas, placement, republish, deny_delete,
+                          allow_msg_ttl, subject_delete_marker_ttl], Config)).
 %% TBD: mirror and sources configuration

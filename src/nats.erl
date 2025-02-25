@@ -91,6 +91,7 @@
 
 -include_lib("kernel/include/logger.hrl").
 -include_lib("stdlib/include/ms_transform.hrl").
+-include_lib("opentelemetry_api/include/otel_tracer.hrl").
 
 -type socket_opts() :: #{netns => string(),
                          netdev => binary(),
@@ -172,8 +173,8 @@
                    reply_to :: undefined | binary()
                   }).
 -record(pid, {pid}).
--record(sub, {pid, sid}).
--record(sub_session, {pid, max_msgs}).
+-record(sub, {owner, sid}).
+-record(sub_session, {owner, notify, max_msgs}).
 -record(ready, {pending}).
 -record(inbox, {}).
 -record(req, {req_id}).
@@ -215,18 +216,24 @@ pub(Server, Subject, Payload) ->
     pub(Server, Subject, Payload, #{}).
 
 pub(Server, Subject, Payload, Opts) ->
-    gen_statem:call(Server, {pub, Subject, Payload, Opts}).
+    call_with_ctx(
+      ~"nats: pub", #{},
+      Server, {pub, Subject, Payload, Opts}).
 
 sub(Server, Subject) ->
     sub(Server, Subject, #{}).
 
 sub(Server, Subject, Opts) ->
-    gen_statem:call(Server, {sub, Subject, Opts, self()}).
+    call_with_ctx(
+      ~"nats: sub", #{},
+      Server, {sub, Subject, self(), Opts}).
 
 unsub(Server, SRef) ->
     unsub(Server, SRef, #{}).
 unsub(Server, SRef, Opts) ->
-    gen_statem:call(Server, {unsub, SRef, Opts}).
+    call_with_ctx(
+      ~"nats: unsub", #{},
+      Server, {unsub, SRef, Opts}).
 
 %% request(Server, Subject, Payload, Opts) ->
 %%     gen_statem:call(Server, {request, Subject, Payload, Opts}).
@@ -234,7 +241,11 @@ unsub(Server, SRef, Opts) ->
 request(Server, Subject, Payload, Opts) ->
     maybe
         {ok, Inbox} ?= gen_statem:call(Server, get_inbox_topic),
-        try gen_statem:call(Server, {request, Subject, Inbox, Payload, Opts}) of
+        try
+            call_with_ctx(
+              ~"nats: request", #{},
+              Server, {request, Subject, Inbox, Payload, Opts})
+        of
             {ok, {_, #{header := <<"NATS/1.0 503\r\n", _/binary>>}}} ->
                 {error, no_responders};
             Reply ->
@@ -419,12 +430,21 @@ handle_event(info, batch_timeout, State, #{batch := Batch} = Data)
     send(Batch, Data),
     {keep_state, Data#{batch_size := 0, batch := [], batch_timer := undefined}};
 
-handle_event(info, {'DOWN', _MRef, process, Pid, normal}, _, Data) ->
-    _ = del_pid_monitor(Pid, Data),
-    Sids = get_pid_subs(Pid, Data),
+handle_event(info, {'DOWN', _MRef, process, Owner, normal}, _, Data) ->
+    _ = del_pid_monitor(Owner, Data),
+    Sids = get_owner_subs(Owner, Data),
     lists:foreach(fun(X) -> del_sid(X, Data) end, Sids),
-    true = length(Sids) =:= del_pid_subs(Pid, Data),
+    true = length(Sids) =:= del_owner_subs(Owner, Data),
     keep_state_and_data;
+
+handle_event(EventType, {with_ctx, Ctx, SpanCtx, Msg}, State, Data) ->
+    Ctx1 = otel_tracer:set_current_span(Ctx, SpanCtx),
+    Token = otel_ctx:attach(Ctx1),
+    try handle_event(EventType, Msg, State, Data)
+    after
+        _ = otel_span:end_span(SpanCtx),
+        otel_ctx:detach(Token)
+    end;
 
 handle_event({call, _From}, _, State, _Data)
   when State =:= connecting; State =:= connected  ->
@@ -444,11 +464,11 @@ handle_event({call, From}, {pub, Subject, Payload, Opts}, State, Data) ->
     Msg = mk_pub_msg(Subject, Payload, Opts),
     send_msg_with_reply(From, ok, Msg, State, Data);
 
-handle_event({call, From}, {sub, Subject, Opts, NotifyPid}, State, Data) ->
+handle_event({call, From}, {sub, Subject, Owner, Opts}, State, Data) ->
     {NatsSid, Sid} = make_sub_id(Data),
-    monitor_sub_pid(NotifyPid, Data),
-    put_pid_sub(NotifyPid, Sid, Data),
-    put_sid_session(Sid, NotifyPid, 0, Data),
+    monitor_owner_sub(Owner, Data),
+    put_owner_sub(Owner, Sid, Data),
+    put_sid_session(Sid, Owner, notify_fun(Owner, Opts), 0, Data),
 
     QueueGrp = maps:get(queue_group, Opts, undefined),
     Msg = nats_msg:sub(Subject, QueueGrp, NatsSid),
@@ -456,14 +476,14 @@ handle_event({call, From}, {sub, Subject, Opts, NotifyPid}, State, Data) ->
 
 handle_event({call, From}, {unsub, {'$sid', NatsSid} = Sid, Opts}, State, Data) ->
     case get_sid(Sid, Data) of
-        [#sub_session{pid = NotifyPid}] ->
+        [#sub_session{owner = Owner, notify = Notify}] ->
             case Opts of
                 #{max_messages := MaxMsgsOpt} when is_integer(MaxMsgsOpt) ->
-                    put_sid_session(Sid, NotifyPid, MaxMsgsOpt, Data);
+                    put_sid_session(Sid, Owner, Notify, MaxMsgsOpt, Data);
                 _ ->
                     del_sid(Sid, Data),
-                    del_pid_sub(NotifyPid, Sid, Data),
-                    demonitor_sub_pid(NotifyPid, Data)
+                    del_owner_sub(Owner, Sid, Data),
+                    demonitor_owner_sub(Owner, Data)
             end,
 
             MaxMsgs = maps:get(max_messages, Opts, undefined),
@@ -676,15 +696,23 @@ handle_nats_msg({info, Payload} = Msg, {connected, Data}) ->
 handle_nats_msg({msg, {Subject, NatsSid, ReplyTo, Payload}} = Msg, {State, _} = DecState)
   when is_record(State, ready) ->
     ?LOG(debug, "got msg: ~p", [Msg]),
-    Opts = reply_opt(ReplyTo, #{}),
-    handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, DecState);
+    ?with_span(
+       ~"nats: msg", #{},
+       fun (_) ->
+               Opts = reply_opt(ReplyTo, #{}),
+               handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, DecState)
+       end);
 
 handle_nats_msg({hmsg, {Subject, NatsSid, ReplyTo, Header, Payload}} = Msg,
                 {State, _} = DecState)
   when is_record(State, ready) ->
     ?LOG(debug, "got msg: ~p", [Msg]),
-    Opts = reply_opt(ReplyTo, #{header => Header}),
-    handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, DecState);
+    ?with_span(
+       ~"nats: hmsg", #{},
+       fun (_) ->
+               Opts = reply_opt(ReplyTo, #{header => Header}),
+               handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, DecState)
+       end);
 handle_nats_msg(Msg, DecState) ->
     ?LOG(debug, "NATS Msg: ~p", [Msg]),
     {continue, DecState}.
@@ -697,9 +725,8 @@ reply_opt(_, Opts) ->
 handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, {_, Data} = DecState) ->
     Sid = {'$sid', binary_to_integer(NatsSid)},
     case get_sid(Sid, Data) of
-        [#sub_session{pid = NotifyPid, max_msgs = MaxMsgs}] ->
-            Resp = {msg, Subject, Payload, Opts},
-            NotifyPid ! {self(), Sid, Resp},
+        [#sub_session{owner = Owner, notify = Notify, max_msgs = MaxMsgs}] ->
+            Notify(Sid, Subject, Payload, Opts),
 
             case MaxMsgs of
                 0 ->
@@ -708,10 +735,10 @@ handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, {_, Data} = DecState) ->
                 1 ->
                     ?LOG(debug, "NATS: Auto-removing subscription, limit reached for sid '~s'", [NatsSid]),
                     del_sid(Sid, Data),
-                    del_pid_sub(NotifyPid, Sid, Data),
-                    demonitor_sub_pid(NotifyPid, Data);
+                    del_owner_sub(Owner, Sid, Data),
+                    demonitor_owner_sub(Owner, Data);
                 _ ->
-                    put_sid_session(Sid, NotifyPid, MaxMsgs - 1, Data)
+                    put_sid_session(Sid, Owner, Notify, MaxMsgs - 1, Data)
             end,
             {continue, DecState};
         [#inbox{}] ->
@@ -1103,28 +1130,28 @@ make_sub_id(#{tid := Tid}) ->
     Sid = ets:update_counter(Tid, '$sid', 1, {'$sid', 0}),
     {integer_to_binary(Sid), {'$sid', Sid}}.
 
-monitor_sub_pid(NotifyPid, #{tid := Tid}) ->
-    PKey = #pid{pid = NotifyPid},
+monitor_owner_sub(Owner, #{tid := Tid}) ->
+    PKey = #pid{pid = Owner},
     case ets:member(Tid, PKey) of
         true  -> ok;
         false ->
-            MRef = monitor(process, NotifyPid),
+            MRef = monitor(process, Owner),
             true = ets:insert(Tid, {PKey, MRef})
     end.
 
-del_pid_monitor(NotifyPid, #{tid := Tid}) ->
-    case ets:take(Tid, #pid{pid = NotifyPid}) of
+del_pid_monitor(Pid, #{tid := Tid}) ->
+    case ets:take(Tid, #pid{pid = Pid}) of
         [{_, MRef}] ->
             [MRef];
         _ ->
             []
     end.
 
-demonitor_sub_pid(NotifyPid, Data) ->
-    case count_pid_sub(NotifyPid, Data) of
+demonitor_owner_sub(Owner, Data) ->
+    case count_owner_subs(Owner, Data) of
         0 ->
             maybe
-                [MRef] ?= del_pid_monitor(NotifyPid, Data),
+                [MRef] ?= del_pid_monitor(Owner, Data),
                 demonitor(MRef)
             end,
             ok;
@@ -1141,26 +1168,27 @@ take_inbox_reqid(ReqId, #{tid := Tid}) ->
         [] -> []
     end.
 
-put_pid_sub(Pid, Sid, #{tid := Tid}) ->
-    true = ets:insert(Tid, {#sub{pid = Pid, sid = Sid}}).
+put_owner_sub(Owner, Sid, #{tid := Tid}) ->
+    true = ets:insert(Tid, {#sub{owner = Owner, sid = Sid}}).
 
-del_pid_sub(Pid, Sid, #{tid := Tid}) ->
-    true = ets:delete(Tid, #sub{pid = Pid, sid = Sid}).
+del_owner_sub(Owner, Sid, #{tid := Tid}) ->
+    true = ets:delete(Tid, #sub{owner = Owner, sid = Sid}).
 
-get_pid_subs(Pid, #{tid := Tid}) ->
-    Ms = [{{#sub{pid = Pid, sid = '$1'}}, [], ['$1']}],
+get_owner_subs(Owner, #{tid := Tid}) ->
+    Ms = [{{#sub{owner = Owner, sid = '$1'}}, [], ['$1']}],
     ets:select(Tid, Ms).
 
-del_pid_subs(Pid, #{tid := Tid}) ->
-    Ms = [{{#sub{pid = Pid, _ = '_'}}, [], [true]}],
+del_owner_subs(Owner, #{tid := Tid}) ->
+    Ms = [{{#sub{owner = Owner, _ = '_'}}, [], [true]}],
     ets:select_delete(Tid, Ms).
 
-count_pid_sub(Pid, #{tid := Tid}) ->
-    Ms = [{{#sub{pid = Pid, _ = '_'}}, [], [true]}],
+count_owner_subs(Owner, #{tid := Tid}) ->
+    Ms = [{{#sub{owner = Owner, _ = '_'}}, [], [true]}],
     ets:select_count(Tid,  Ms).
 
-put_sid_session(Sid, Pid, MaxMsgs, #{tid := Tid}) ->
-    true = ets:insert(Tid, {Sid, #sub_session{pid = Pid, max_msgs = MaxMsgs}}).
+put_sid_session(Sid, Owner, Notify, MaxMsgs, #{tid := Tid}) ->
+    Obj = {Sid, #sub_session{owner = Owner, notify = Notify, max_msgs = MaxMsgs}},
+    true = ets:insert(Tid, Obj).
 
 put_sid_inbox(Sid, #{tid := Tid}) ->
     true = ets:insert(Tid, {Sid, #inbox{}}).
@@ -1281,3 +1309,18 @@ init_data(Host, Port, Opts) ->
              host => Host,
              port => Port},
     maps:merge(Opts, Data).
+
+notify_fun(_, #{notify := Notify})
+  when is_function(Notify, 4) ->
+    Notify;
+notify_fun(Owner, _) ->
+    Self = self(),
+    fun(Sid, Subject, Payload, MsgOpts) ->
+            Resp = {msg, Subject, Payload, MsgOpts},
+            Owner ! {Self, Sid, Resp}
+    end.
+
+call_with_ctx(Name, Opts, ServerRef, Request) ->
+    SpanCtx = ?start_span(Name, Opts),
+    Ctx = otel_ctx:get_current(),
+    gen_statem:call(ServerRef, {with_ctx, Ctx, SpanCtx, Request}).

@@ -11,10 +11,10 @@ on:
 jobs:
   test:
     name: CI
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
-        otp: [27.0, 27.1]
+        otp: [27.1, 27.2, 27.3, 28.0.0.0-rc2]
     container:
       image: erlang:${{ matrix.otp }}-alpine
       options: --privileged
@@ -23,8 +23,7 @@ jobs:
       name: Prepare
       run: |
            apk update
-           apk --no-cache upgrade
-           apk --no-cache add docker git zstd iproute2 iproute2-ss make gcc libc-dev
+           apk --no-cache -u add docker git zstd iproute2 iproute2-ss make gcc libc-dev
     -
       name: git special configs
       run: |
@@ -59,7 +58,7 @@ jobs:
   publish-test-results:
     name: "Publish Tests Results"
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       checks: write
       pull-requests: write
@@ -80,7 +79,7 @@ jobs:
 
   slack:
     needs: test
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     if: always()
     steps:
     -

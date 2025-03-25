@@ -399,10 +399,10 @@ update(Conn, Bucket, Key, Value, SeqNo)
 -doc """
 Delete will place a delete marker and leave all revisions. A history
 of a deleted key can still be retrieved by using the History method
-or a watch on the key. [Delete] is a non-destructive operation and
+or a watch on the key. `Delete` is a non-destructive operation and
 will not remove any previous revisions from the underlying stream.
 
-[LastRevision] option can be specified to only perform delete if the
+`LastRevision` option can be specified to only perform delete if the
 latest revision the provided one.
 """.
 delete(Conn, Bucket, Key) ->
@@ -435,10 +435,10 @@ delete(Conn, Bucket, Key, Opts)
 -doc """
 Purge will place a delete marker and remove all previous revisions.
 Only the latest revision will be preserved (with a delete marker).
-Unlike [Delete], Purge is a destructive operation and will remove all
+Unlike `Delete`, Purge is a destructive operation and will remove all
 previous revisions from the underlying streams.
 
-[LastRevision] option can be specified to only perform purge if the
+`LastRevision` option can be specified to only perform purge if the
 latest revision the provided one.
 """.
 purge(Conn, Bucket, Key) ->

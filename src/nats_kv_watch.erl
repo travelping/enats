@@ -132,15 +132,15 @@ init([Conn, Bucket, Keys, #{owner := Owner} = WatchOpts, Opts]) ->
     Cb = maps:get(cb, WatchOpts, fun default_cb/3),
     InitCnt = maps:get(num_pending, Watch, 0),
     Data0 = #data{
-              owner = Owner,
-              subj_pre = ?SUBJECT_NAME(Bucket, <<>>),
-              conn = Conn,
-              watch = Watch,
-              sid = Sid,
-              cb = Cb,
-              ignore_deletes = maps:get(ignore_deletes, WatchOpts, false),
-              init_cnt = InitCnt
-             },
+               owner = Owner,
+               subj_pre = ?SUBJECT_NAME(Bucket, <<>>),
+               conn = Conn,
+               watch = Watch,
+               sid = Sid,
+               cb = Cb,
+               ignore_deletes = maps:get(ignore_deletes, WatchOpts, false),
+               init_cnt = InitCnt
+              },
 
     case Cb({init, Owner}, Conn, InitCnt) of
         {continue, CbState} ->

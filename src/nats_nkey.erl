@@ -100,21 +100,20 @@ valid_seed(_, _) ->
     {error, invalid_seed}.
 
 check_crc(Raw, CRC) ->
-    case crc:ccitt_16_xmodem(Raw) of
+    case crc(Raw) of
         CRC -> ok;
         _ -> {error, invalid_crc}
     end.
 
 public(#nkey{type = Type, key = {Public, _Private}}) ->
     WithPrefix = <<Type:5, 0:3, Public/binary>>,
-    CRC = crc:ccitt_16_xmodem(WithPrefix),
+    CRC = crc(WithPrefix),
     encode_base32(<<WithPrefix/binary, CRC:16/little>>).
 
 sign(#nkey{key = {_Public, Private}}, Data) ->
     crypto:sign(eddsa, none, Data, [Private, ed25519]).
 
--if(0).
-%% not used, but might be helpful at some point
+%% CCITT-16 xmodem CRC variant
 crc(Bin) ->
     crc(Bin, 0).
 
@@ -381,5 +380,3 @@ crc_table(16#FC) -> 16#2E93;
 crc_table(16#FD) -> 16#3EB2;
 crc_table(16#FE) -> 16#0ED1;
 crc_table(16#FF) -> 16#1EF0.
-
--endif.

@@ -974,22 +974,22 @@ handle_nats_info(Payload, Data0) ->
     end.
 
 tls_server_name_indication(Host, TlsOpts) ->
-   case proplists:is_defined(server_name_indication, TlsOpts) of
-       false when is_list(Host); is_tuple(Host) ->
-           [{server_name_indication, Host}|TlsOpts];
-       false when is_binary(Host) ->
-           [{server_name_indication, binary_to_list(Host)}|TlsOpts];
-       _ ->
-           TlsOpts
-   end.
+    case proplists:is_defined(server_name_indication, TlsOpts) of
+        false when is_list(Host); is_tuple(Host) ->
+            [{server_name_indication, Host}|TlsOpts];
+        false when is_binary(Host) ->
+            [{server_name_indication, binary_to_list(Host)}|TlsOpts];
+        _ ->
+            TlsOpts
+    end.
 
 tls_customize_hostname_check(TlsOpts) ->
-   case proplists:is_defined(customize_hostname_check, TlsOpts) of
-       true -> TlsOpts;
-       false ->
-           [{customize_hostname_check, [{match_fun, public_key:pkix_verify_hostname_match_fun(https)}]} |
-            TlsOpts]
-   end.
+    case proplists:is_defined(customize_hostname_check, TlsOpts) of
+        true -> TlsOpts;
+        false ->
+            [{customize_hostname_check, [{match_fun, public_key:pkix_verify_hostname_match_fun(https)}]} |
+             TlsOpts]
+    end.
 
 tls_opts(#{host := Host, tls_opts := TlsOpts0}) ->
     TlsOpts1 = tls_server_name_indication(Host, TlsOpts0),
@@ -1083,7 +1083,7 @@ client_auth(#{auth_required := true}, #{user := User, pass := Pass}, Nats)
   when is_binary(User), is_binary(Pass) ->
     {ok, Nats#{user => User, pass => Pass}};
 client_auth(#{auth_required := true}, #{auth_token := Token}, Nats)
-    when is_binary(Token) ->
+  when is_binary(Token) ->
     {ok, Nats#{auth_token => Token}};
 client_auth(#{auth_required := true, nonce := Nonce},
             #{nkey_seed := <<"SU", _/binary>> = Seed, jwt := JWT}, Nats) ->

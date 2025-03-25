@@ -13,7 +13,7 @@ on:
 jobs:
   code-style-review:
     runs-on: ubuntu-24.04
-    container: erlang:27.3-alpine
+    container: erlang:28-alpine
     env:
       ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -28,6 +28,12 @@ jobs:
       -
         name: Check out repository
         uses: actions/checkout@v4
+        with:
+          # GitHub pull_request_target Actions works on the target branch,
+          # this is used to prevent a PR to alter the workflow itself
+          # we therefore have to checkout the head ref of the PR explicitly
+          ref: ${{github.event.pull_request.head.ref}}
+          repository: ${{github.event.pull_request.head.repo.full_name}}
       -
         name: format
         run: rebar3 fmt

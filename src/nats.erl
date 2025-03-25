@@ -183,6 +183,11 @@
 -record(svc, {module, state, id, service, endpoints, started}).
 -record(endpoint, {function, id, endpoint}).
 
+-opaque nats_endpoint() :: #endpoint{}.
+-opaque nats_service() :: #svc{}.
+
+-export_type([nats_endpoint/0, nats_service/0]).
+
 %%%===================================================================
 %%% API
 %%%===================================================================
@@ -291,11 +296,11 @@ is_ready(Server) ->
 dump_subs(Server) ->
     gen_statem:call(Server, dump_subs).
 
--spec service(service(),  nonempty_list(#endpoint{}), module(), any()) -> #svc{}.
+-spec service(service(),  nonempty_list(nats_endpoint()), module(), any()) -> nats_service().
 service(SvcDesc, EndpDesc, Module, State) ->
     #svc{module = Module, state = State, service = SvcDesc, endpoints = EndpDesc}.
 
--spec endpoint(endpoint(), atom()) -> #endpoint{}.
+-spec endpoint(endpoint(), atom()) -> nats_endpoint().
 endpoint(EndpDesc, Function) ->
     #endpoint{function = Function,
               endpoint = maps:merge(#{queue_group => ~"q", metadata => null}, EndpDesc)}.
@@ -402,7 +407,7 @@ handle_event(enter, _, closed, Data) ->
 
 handle_event(enter, _, connected, #{socket := Socket} = Data) ->
     ?LOG(debug, "NATS enter connected state, socket ~p", [Socket]),
-    ok = setopts(Data, [{active,once}]),
+    ok = setopts(Data, [{active, once}]),
     keep_state_and_data;
 handle_event(enter, OldState, State, #{socket := _} = Data)
   when not is_record(OldState, ready), is_record(State, ready) ->
@@ -645,7 +650,7 @@ send_msg_with_reply(From, Reply, Msg, #ready{pending = undefined}, Data) ->
     {keep_state, enqueue_msg(Msg, Data), [{reply, From, Reply}]}.
 
 socket_active(connected, connected, Data) ->
-    _ = setopts(Data, [{active,once}]),
+    _ = setopts(Data, [{active, once}]),
     ok;
 socket_active(_, _, _) ->
     ok.
@@ -666,7 +671,7 @@ handle_message(Bin, State0, #{recv_buffer := Acc0} = Data0) ->
 handle_nats_msg(stop, DecState) ->
     {stop, DecState};
 
-handle_nats_msg(ok, {#ready{pending = Pending} = State, #{send_q := [Msg|More]} = Data})
+handle_nats_msg(ok, {#ready{pending = Pending} = State, #{send_q := [Msg | More]} = Data})
   when Pending /= undefined ->
     {continue, {State, enqueue_msg(Msg, Data#{send_q := More})}};
 
@@ -748,8 +753,8 @@ handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, {_, Data} = DecState) ->
             ?LOG(debug, "## SERVICE: ~p", [Service]),
             ?LOG(debug, "NATS msg for service '~p'", [SvcName]),
             handle_nats_service_msg(Service, Subject, Payload, Opts, DecState);
-        _Other ->
-            ?LOG(debug, "NATS msg for unexpected sid ~w: ~p", [NatsSid, _Other]),
+        Other ->
+            ?LOG(debug, "NATS msg for unexpected sid ~w: ~p", [NatsSid, Other]),
             {continue, DecState}
     end.
 
@@ -940,8 +945,8 @@ handle_nats_service_msg(#service{svc = SvcName, op = Op,
                          [M, F, C, E, St]),
                     {continue, DecState}
             end;
-        _Other ->
-            ?LOG(debug, "Unexpected service request: ~p", [_Other]),
+        Other ->
+            ?LOG(debug, "Unexpected service request: ~p", [Other]),
             {continue, DecState}
     end;
 
@@ -976,9 +981,9 @@ handle_nats_info(Payload, Data0) ->
 tls_server_name_indication(Host, TlsOpts) ->
     case proplists:is_defined(server_name_indication, TlsOpts) of
         false when is_list(Host); is_tuple(Host) ->
-            [{server_name_indication, Host}|TlsOpts];
+            [{server_name_indication, Host} | TlsOpts];
         false when is_binary(Host) ->
-            [{server_name_indication, binary_to_list(Host)}|TlsOpts];
+            [{server_name_indication, binary_to_list(Host)} | TlsOpts];
         _ ->
             TlsOpts
     end.
@@ -1017,13 +1022,13 @@ send(Bin, #{socket := Socket, tls := false}) ->
 send(Bin, #{socket := Socket, tls := true}) ->
     ssl:send(Socket, Bin).
 
-continue_enqueue_batch([Msg|More],
+continue_enqueue_batch([Msg | More],
                        #ready{pending = undefined} = State, #{verbose := true} = Data) ->
     {continue, {State#ready{pending = ok}, enqueue_msg(Msg, Data#{send_q := More})}};
 continue_enqueue_batch(Batch, State, Data) ->
     {continue, {State, enqueue_msg(Batch, Data)}}.
 
-next_state_enqueue_batch([Msg|More], Action,
+next_state_enqueue_batch([Msg | More], Action,
                          #ready{pending = undefined} = State, #{verbose := true} = Data) ->
     {next_state, State#ready{pending = Action}, enqueue_msg(Msg, Data#{send_q := More})};
 next_state_enqueue_batch(Batch, Action, State, Data) ->

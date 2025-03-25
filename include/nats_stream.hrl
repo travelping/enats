@@ -1,6 +1,9 @@
 -ifndef(NATS_STREAM_HRL).
 -define(NATS_STREAM_HRL, true).
 
+%% yes, the lines are too long, but breaking them is worse
+-elvis([{elvis_text_style, line_length, disable}]).
+
 -define(JS_API_V1_ACCOUNT_INFO_RESPONSE, 'io.nats.jetstream.api.v1.account_info_response').
 -define(JS_API_V1_ACCOUNT_PURGE_RESPONSE, 'io.nats.jetstream.api.v1.account_purge_response').
 -define(JS_API_V1_CONSUMER_CREATE_RESPONSE, 'io.nats.jetstream.api.v1.consumer_create_response').

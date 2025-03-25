@@ -10,7 +10,7 @@
    ]},
   {env,[]},
   {modules, []},
-
+  {maintainers, ["Travelping GmbH"]},
   {licenses, ["Apache-2.0"]},
-  {links, []}
+  {links, [{"Github", "https://github.com/travelping/enats"}]}
  ]}.

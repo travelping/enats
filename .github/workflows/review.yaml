@@ -12,8 +12,8 @@ on:
 
 jobs:
   code-style-review:
-    runs-on: ubuntu-22.04
-    container: erlang:27.1-alpine
+    runs-on: ubuntu-24.04
+    container: erlang:27.3-alpine
     env:
       ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -21,6 +21,10 @@ jobs:
         name: install dependencies
         run: |
           apk --no-cache -u add git emacs-nox
+      -
+        name: git special configs
+        run: |
+          git config --global --add safe.directory /__w/enats/enats
       -
         name: Check out repository
         uses: actions/checkout@v4

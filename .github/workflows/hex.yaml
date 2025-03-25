@@ -7,19 +7,18 @@ on:
 
 jobs:
   publish:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     container:
-      image: erlang:27.1-alpine
+      image: erlang:27.3-alpine
     steps:
     - name: Prepare
       run: |
            apk update
-           apk --no-cache upgrade
-           apk --no-cache add git
+           apk --no-cache -u add git
     - uses: actions/checkout@v4
     - name: Publish to Hex.pm
       env:
         HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
       run: |
-           rebar3 ex_edoc
+           rebar3 ex_doc
            rebar3 hex publish -r hexpm --yes

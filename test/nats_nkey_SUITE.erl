@@ -21,6 +21,7 @@
 
 all() ->
     [decode, from_seed, from_invalid_seed,
+     decode_credential,
      %% from_seed_valid_prefix  %% seeds copied from gnats, but have broken CRCs and gnats has broken CRC checks....
      sign
     ].
@@ -82,6 +83,32 @@ from_seed_valid_prefix(_) ->
               ct:pal("Seed: ~s", [X]),
               ?assertMatch({ok, _}, nats_nkey:from_seed(X))
       end, Seeds).
+
+decode_credential() ->
+    [{doc, "decode NATS/NKEY decorated format (e.g. read from file"}].
+decode_credential(_) ->
+    Bin =
+        <<"-----BEGIN NATS USER JWT-----\n"
+          "eyJ0eXAiOiJqd3QiLCJhbGciOiJlZDI1NTE5In0.eyJqdGkiOiJUVlNNTEtTWkJBN01VWDNYQUxNUVQzTjRISUw1UkZGQU9YNUtaUFhEU0oyWlAzNkVMNVJBIiwiaWF0IjoxNTU4MDQ1NTYyLCJpc3MiOiJBQlZTQk0zVTQ1REdZRVVFQ0tYUVM3QkVOSFdHN0tGUVVEUlRFSEFKQVNPUlBWV0JaNEhPSUtDSCIsIm5hbWUiOiJvbWVnYSIsInN1YiI6IlVEWEIyVk1MWFBBU0FKN1pEVEtZTlE3UU9DRldTR0I0Rk9NWVFRMjVIUVdTQUY3WlFKRUJTUVNXIiwidHlwZSI6InVzZXIiLCJuYXRzIjp7InB1YiI6e30sInN1YiI6e319fQ.6TQ2ilCDb6m2ZDiJuj_D_OePGXFyN3Ap2DEm3ipcU5AhrWrNvneJryWrpgi_yuVWKo1UoD5s8bxlmwypWVGFAA\n"
+          "------END NATS USER JWT------\n"
+          "\n"
+          "************************* IMPORTANT *************************\n"
+          "NKEY Seed printed below can be used to sign and prove identity.\n"
+          "NKEYs are sensitive and should be treated as secrets.\n"
+          "\n"
+          "-----BEGIN USER NKEY SEED-----\n"
+          "SUAOY5JZ2WJKVR4UO2KJ2P3SW6FZFNWEOIMAXF4WZEUNVQXXUOKGM55CYE\n"
+          "------END USER NKEY SEED------\n"
+          "\n"
+          "*************************************************************\n"
+          "\n">>,
+
+    Res = nats_nkey:decode_credential(Bin),
+    ct:pal("R: ~p~n", [Res]),
+    ?assertEqual(<<"eyJ0eXAiOiJqd3QiLCJhbGciOiJlZDI1NTE5In0.eyJqdGkiOiJUVlNNTEtTWkJBN01VWDNYQUxNUVQzTjRISUw1UkZGQU9YNUtaUFhEU0oyWlAzNkVMNVJBIiwiaWF0IjoxNTU4MDQ1NTYyLCJpc3MiOiJBQlZTQk0zVTQ1REdZRVVFQ0tYUVM3QkVOSFdHN0tGUVVEUlRFSEFKQVNPUlBWV0JaNEhPSUtDSCIsIm5hbWUiOiJvbWVnYSIsInN1YiI6IlVEWEIyVk1MWFBBU0FKN1pEVEtZTlE3UU9DRldTR0I0Rk9NWVFRMjVIUVdTQUY3WlFKRUJTUVNXIiwidHlwZSI6InVzZXIiLCJuYXRzIjp7InB1YiI6e30sInN1YiI6e319fQ.6TQ2ilCDb6m2ZDiJuj_D_OePGXFyN3Ap2DEm3ipcU5AhrWrNvneJryWrpgi_yuVWKo1UoD5s8bxlmwypWVGFAA">>,
+                 proplists:get_value(jwt, Res)),
+    ?assertMatch({nkey, 20, _}, proplists:get_value(seed, Res)),
+    ok.
 
 sign() ->
     [{doc, "sign nonces"}].

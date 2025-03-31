@@ -18,6 +18,7 @@
 
 -export([decode_base32/1, encode_base32/1]).
 -export([from_seed/1, public/1, sign/2]).
+-export([decode_credential/1]).
 
 -include("nats_nkey.hrl").
 
@@ -112,6 +113,90 @@ public(#nkey{type = Type, key = {Public, _Private}}) ->
 
 sign(#nkey{key = {_Public, Private}}, Data) ->
     crypto:sign(eddsa, none, Data, [Private, ed25519]).
+
+decode_credential(Bin) ->
+    decode_entries(
+      binary:split(Bin, [<<"\r\n">>, <<"\r">>, <<"\n">>], [global]), []).
+
+decode_entries([], Entries) ->
+    lists:reverse(Entries);
+decode_entries([<<>>], Entries) ->
+    lists:reverse(Entries);
+decode_entries([<<>> | Lines], Entries) ->
+    decode_entries(Lines, Entries);
+decode_entries([StartLine | Lines], Entries) ->
+    Start = strip_tail_whitespace(StartLine),
+    case entry_start(Start) of
+        undefined ->
+            decode_entries(Lines, Entries);
+        StartTag ->
+            {Entry, RestLines} = join_entry(Lines, []),
+            decode_entries(RestLines, [decode_entry(StartTag, Entry) | Entries])
+    end.
+
+%% borrowed from OTP's pubkey_pem.erl, faster than string:trim/3.
+strip_tail_whitespace(Bin) when is_binary(Bin) ->
+    strip_tail_whitespace(lists:reverse(binary:bin_to_list(Bin)));
+strip_tail_whitespace([Char|Rest])
+  when Char == $ ;
+       Char == $\t;
+       Char == $\v;
+       Char == $\f;
+       Char == $\r;
+       Char == $\n ->
+    strip_tail_whitespace(Rest);
+strip_tail_whitespace(List) ->
+    binary:list_to_bin(
+      lists:reverse(List)).
+
+decode_entry(Start, Lines) ->
+    Type = entry_type(Start),
+    Cs = erlang:iolist_to_binary(Lines),
+    decode_entry_type(Type, Cs).
+
+decode_entry_type(jwt = Type, Cs) ->
+    {Type, Cs};
+decode_entry_type(seed = Type, <<$S:8, SeedType:8, _/binary>> = Cs)
+  when SeedType =:= $O;
+       SeedType =:= $A;
+       SeedType =:= $U ->
+    {ok, Seed} = from_seed(Cs),
+    {Type, Seed}.
+
+delim_tag(Line) ->
+    Re = ~B"\s*[-]{3,}([^-]+)[-]{3,}$",
+    case re:run(Line, Re, [unicode, {capture, [1], binary}]) of
+        {match, [Tag]} ->
+            Tag;
+        _ ->
+            undefined
+    end.
+
+%% Ignore white space at end of line
+join_entry([<<"---", _/binary>> = Line| Lines], Entry) ->
+    case delim_tag(Line) of
+        <<"END", _/binary>> ->
+            {lists:reverse(Entry), Lines};
+        _ ->
+            join_entry(Lines, [Line | Entry])
+    end;
+join_entry([Line | Lines], Entry) ->
+    join_entry(Lines, [Line | Entry]).
+
+entry_start(<<"---", _/binary>> = Line) ->
+    case delim_tag(Line) of
+        <<"BEGIN", _/binary>> = Tag ->
+            Tag;
+        _ ->
+            undefined
+    end;
+entry_start(_) ->
+    undefined.
+
+entry_type(~"BEGIN NATS USER JWT") ->
+    jwt;
+entry_type(~"BEGIN USER NKEY SEED") ->
+    seed.
 
 %% CCITT-16 xmodem CRC variant
 crc(Bin) ->

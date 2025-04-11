@@ -66,6 +66,7 @@
         #{verbose => false,
           pedantic => false,
           tls_required => false,
+          tls_first => false,
           tls_opts => [],
           auth_required => optional,
           name => <<"nats">>,
@@ -105,6 +106,7 @@
                   verbose        => boolean(),
                   pedantic       => boolean(),
                   tls_required   => boolean(),
+                  tls_first      => boolean(),
                   tls_opts       => [ssl:tls_client_option()],
                   auth_required  => 'optional' | boolean(),
                   auth_token     => binary(),
@@ -150,6 +152,7 @@
                   socket_opts    := socket_opts(),
                   verbose        := boolean(),
                   pedantic       := boolean(),
+                  tls_first      := boolean(),
                   tls_required   := boolean(),
                   tls_opts       := [ssl:tls_client_option()],
                   auth_required  := 'optional' | boolean(),
@@ -348,10 +351,10 @@ handle_event(enter, _, connecting, _) ->
     self() ! ?CONNECT_TAG,
     keep_state_and_data;
 
-handle_event(info, {?CONNECT_TAG, Pid, {ok, Socket}},
+handle_event(info, {?CONNECT_TAG, Pid, TLS, {ok, Socket}},
              connecting, #{host := Host, port := Port, socket := Pid} = Data) ->
     ?LOG(debug, "NATS client connected to ~s:~w", [fmt_host(Host), Port]),
-    {next_state, connected, Data#{socket := Socket}};
+    {next_state, connected, Data#{socket := Socket, tls := TLS}};
 
 handle_event(info, {{'DOWN', ?CONNECT_TAG}, _, process, Pid, Reason},
              connecting, #{host := Host, port := Port, socket := Pid} = Data) ->
@@ -363,7 +366,7 @@ handle_event(info, {{'DOWN', ?CONNECT_TAG}, _, process, Pid, Reason},
 handle_event(info, {{'DOWN', ?CONNECT_TAG}, _, process, _, _}, _, _) ->
     keep_state_and_data;
 
-handle_event(info, {?CONNECT_TAG, Pid, {error, _} = Error},
+handle_event(info, {?CONNECT_TAG, Pid, _, {error, _} = Error},
              connecting, #{host := Host, port := Port, socket := Pid} = Data) ->
     ?LOG(debug, "NATS client failed to open TCP socket for connecting to ~s:~w with ~p",
          [fmt_host(Host), Port, Error]),
@@ -374,19 +377,9 @@ handle_event(info, ?CONNECT_TAG, connecting, #{host := Host, port := Port} = Dat
     case get_host_addr(Host) of
         {ok, IP} ->
             Owner = self(),
-            SocketOpts = socket_opts(Data),
             {Pid, _} =
                 proc_lib:spawn_opt(
-                  fun() ->
-                          Result = gen_tcp:connect(IP, Port, SocketOpts, ?CONNECT_TIMEOUT),
-                          case Result of
-                              {ok, Socket} ->
-                                  ok = gen_tcp:controlling_process(Socket, Owner);
-                              _ ->
-                                  ok
-                          end,
-                          Owner ! {?CONNECT_TAG, self(), Result}
-                  end,
+                  fun() -> async_connect(Owner, IP, Port, Data) end,
                   [{monitor, [{tag, {'DOWN', ?CONNECT_TAG}}]}]),
             {keep_state, Data#{socket := Pid}};
         {error, _} = Error ->
@@ -421,6 +414,18 @@ handle_event(info, {tcp_closed, Socket}, _, #{socket := Socket} = Data) ->
     {next_state, closed, close_socket(Data)};
 
 handle_event(info, {tcp, Socket, Bin}, State, #{socket := Socket} = Data)
+  when State =:= connected; is_record(State, ready) ->
+    ?LOG(debug, "got data: ~p", [Bin]),
+    handle_message(Bin, State, Data);
+
+
+handle_event(info, {ssl_error, Socket, Reason}, _, #{socket := Socket} = Data) ->
+    log_connection_error(Reason, Data),
+    {next_state, closed, close_socket(Data)};
+handle_event(info, {ssl_closed, Socket}, _, #{socket := Socket} = Data) ->
+    {next_state, closed, close_socket(Data)};
+
+handle_event(info, {ssl, Socket, Bin}, State, #{socket := Socket} = Data)
   when State =:= connected; is_record(State, ready) ->
     ?LOG(debug, "got data: ~p", [Bin]),
     handle_message(Bin, State, Data);
@@ -995,6 +1000,8 @@ tls_opts(#{host := Host, tls_opts := TlsOpts0}) ->
     TlsOpts1 = tls_server_name_indication(Host, TlsOpts0),
     _TlsOpts = tls_customize_hostname_check(TlsOpts1).
 
+ssl_upgrade(#{tls_required := true}, #{tls := true} = Data) ->
+    {ok, Data};
 ssl_upgrade(#{tls_required := true}, #{socket := Socket} = Data) ->
     case ssl:connect(Socket, tls_opts(Data)) of
         {ok, NewSocket} ->
@@ -1223,6 +1230,28 @@ put_svc(SvcName, Id, #svc{} = Svc, #{tid := Tid}) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+async_connect(Owner, IP, Port, #{tls_first := true} = Data) ->
+    Opts = socket_opts(Data) ++ tls_opts(Data),
+    Result = ssl:connect(IP, Port, Opts, ?CONNECT_TIMEOUT),
+    case Result of
+        {ok, Socket} ->
+            ok = ssl:controlling_process(Socket, Owner);
+        _ ->
+            ok
+    end,
+    Owner ! {?CONNECT_TAG, self(), true, Result};
+async_connect(Owner, IP, Port, Data) ->
+    SocketOpts = socket_opts(Data),
+    Result = gen_tcp:connect(IP, Port, SocketOpts, ?CONNECT_TIMEOUT),
+    case Result of
+        {ok, Socket} ->
+            ok = gen_tcp:controlling_process(Socket, Owner);
+        _ ->
+            ok
+    end,
+    Owner ! {?CONNECT_TAG, self(), false, Result}.
+
 
 rnd_topic_id() ->
     base62enc(rand:uniform(16#ffffffffffffffffffffffffffffffff)).

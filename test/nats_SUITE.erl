@@ -74,13 +74,13 @@ connect_ok(_) ->
 
 connect_fail_no_host(_) ->
     %% connect returns a new connection process,
-    %% If the connection fails (host not found),
-    %% a {Connection, {error, nxdomain}} message is sent to the owner
+    %% If if there are no valid servers left,
+    %% a {Connection, {error, no_more_candidates}} message is sent to the owner
 
     {ok, _Host, Port} = nats_addr(),
     {ok, C} = nats:connect(<<"doesnt-exist.google.com">>, Port),
     receive
-        {C, {error, nxdomain}} -> ok
+        {C, {error, no_more_candidates}} -> ok
     after 1000 ->
             throw(error_on_fail_not_sent)
     end.

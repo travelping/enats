@@ -61,9 +61,14 @@
 -define(DEFAULT_SEND_TIMEOUT, 1).
 -define(DEFAULT_MAX_BATCH_SIZE, 100).
 -define(CONNECT_TIMEOUT, 1000).
+-define(DEFAULT_EXPLICIT_HOST_PREFERENCE, 0).
+-define(DEFAULT_EXPLICIT_HOST_ORDER, 0).
+-define(DEFAULT_IMPLICIT_HOST_PREFERENCE, 0).
+-define(DEFAULT_IMPLICIT_HOST_ORDER, 0).
 
 -define(DEFAULT_OPTS,
-        #{verbose => false,
+        #{socket_opts => #{},
+          verbose => false,
           pedantic => false,
           tls_required => false,
           tls_first => false,
@@ -71,12 +76,15 @@
           auth_required => optional,
           name => <<"nats">>,
           lang => <<"Erlang">>,
-          version => undefined,
           headers => true,
           no_responders => true,
           buffer_size => 0,
           max_batch_size => ?DEFAULT_MAX_BATCH_SIZE,
-          send_timeout => ?DEFAULT_SEND_TIMEOUT
+          send_timeout => ?DEFAULT_SEND_TIMEOUT,
+          default_explicit_host_preference => ?DEFAULT_EXPLICIT_HOST_PREFERENCE,
+          default_explicit_host_order => ?DEFAULT_EXPLICIT_HOST_ORDER,
+          default_implicit_host_preference => ?DEFAULT_IMPLICIT_HOST_PREFERENCE,
+          default_implicit_host_order => ?DEFAULT_IMPLICIT_HOST_ORDER
          }).
 -define(DEFAULT_SOCKET_OPTS,
         #{reuseaddr => true}).
@@ -102,25 +110,66 @@
 -type nats_host() :: inet:socket_address() | inet:hostname() | binary().
 %% -type nats_host() :: inet:socket_address().
 
--type opts() :: #{socket_opts    => socket_opts(),
-                  verbose        => boolean(),
-                  pedantic       => boolean(),
-                  tls_required   => boolean(),
-                  tls_first      => boolean(),
-                  tls_opts       => [ssl:tls_client_option()],
-                  auth_required  => 'optional' | boolean(),
-                  auth_token     => binary(),
-                  user           => binary(),
-                  pass           => binary(),
-                  name           => binary(),
-                  lang           => binary(),
-                  version        => binary(),
-                  headers        => boolean(),
-                  no_responders  => boolean(),
-                  buffer_size    => -1 | non_neg_integer(),
-                  max_batch_size => non_neg_integer(),
-                  send_timeout   => non_neg_integer()
-                 }.
+-type nats_server_info() :: #{scheme    => binary(),
+                              host      => nats_host(),
+                              port      => non_neg_integer() | undefined}.
+
+-type nats_server_opts() :: #{scheme     := binary(),
+                              preference   := 0..65535,
+                              host_order := 0..65535,
+                              explicit   := boolean()}.
+
+-type nats_server() :: #{scheme     := binary(),
+                         host       := nats_host(),
+                         port       := non_neg_integer() | undefined,
+                         preference   := 0..65535,
+                         host_order := 0..65535,
+                         explicit   := boolean()}.
+
+-type v0_opts() :: #{socket_opts    => socket_opts(),
+                     verbose        => boolean(),
+                     pedantic       => boolean(),
+                     tls_required   => boolean(),
+                     tls_first      => boolean(),
+                     tls_opts       => [ssl:tls_client_option()],
+                     auth_required  => 'optional' | boolean(),
+                     auth_token     => binary(),
+                     user           => binary(),
+                     pass           => binary(),
+                     name           => binary(),
+                     lang           => binary(),
+                     version        => binary(),
+                     headers        => boolean(),
+                     no_responders  => boolean(),
+                     buffer_size    => -1 | non_neg_integer(),
+                     max_batch_size => non_neg_integer(),
+                     send_timeout   => non_neg_integer()
+                    }.
+
+-type v1_opts() :: #{socket_opts    => socket_opts(),
+                     verbose        => boolean(),
+                     pedantic       => boolean(),
+                     tls_required   => boolean(),
+                     tls_first      => boolean(),
+                     tls_opts       => [ssl:tls_client_option()],
+                     auth_required  => 'optional' | boolean(),
+                     auth_token     => binary(),
+                     user           => binary(),
+                     pass           => binary(),
+                     name           => binary(),
+                     lang           => binary(),
+                     version        => binary(),
+                     headers        => boolean(),
+                     no_responders  => boolean(),
+                     buffer_size    => -1 | non_neg_integer(),
+                     max_batch_size => non_neg_integer(),
+                     send_timeout   => non_neg_integer(),
+                     default_explicit_host_preference => 0..65535,
+                     default_explicit_host_order => 0..65535,
+                     default_implicit_host_preference => 0..65535,
+                     default_implicit_host_order => 0..65535,
+                     servers        => [nats_server_info()]
+                    }.
 
 -type endpoint() :: #{name        := binary(),
                       group_name  => binary(),
@@ -132,6 +181,29 @@
                      description => binary(),
                      metadata    => map()
                     }.
+
+-type server_opts() :: #{socket_opts    := socket_opts(),
+                         verbose        := boolean(),
+                         pedantic       := boolean(),
+                         tls_required   := boolean(),
+                         tls_first      := boolean(),
+                         tls_opts       := [ssl:tls_client_option()],
+                         auth_required  := 'optional' | boolean(),
+                         auth_token     => binary(),
+                         user           => binary(),
+                         pass           => binary(),
+                         name           := binary(),
+                         lang           := binary(),
+                         version        => binary(),
+                         headers        := boolean(),
+                         no_responders  := boolean(),
+                         buffer_size    := -1 | non_neg_integer(),
+                         max_batch_size := non_neg_integer(),
+                         send_timeout   := non_neg_integer(),
+                         default_server_opts := nats_server_opts(),
+                         servers        := [nats_server()],
+                         _              => _
+                        }.
 
 -type data() :: #{socket         := undefined | gen_tcp:socket() | ssl:socket(),
                   tls            := boolean(),
@@ -147,8 +219,7 @@
 
                   %% Opts
                   parent         := pid(),
-                  host           := nats_host(),
-                  port           := inet:port_number(),
+                  server         := undefined | nats_server(),
                   socket_opts    := socket_opts(),
                   verbose        := boolean(),
                   pedantic       := boolean(),
@@ -167,6 +238,9 @@
                   buffer_size    := non_neg_integer(),
                   max_batch_size := non_neg_integer(),
                   send_timeout   := non_neg_integer(),
+                  default_server_opts := nats_server_opts(),
+                  servers        := [nats_server()],
+                  candidates     := [nats_server()],
                   _              => _
                  }.
 
@@ -190,21 +264,48 @@
 %%% API
 %%%===================================================================
 
-start_link(Host, Port, Opts) ->
-    gen_statem:start_link(?MODULE, {Host, Port, maps:merge(#{parent => self()}, Opts)}, []).
+start_link(Opts) ->
+    gen_statem:start_link(?MODULE, {maps:merge(#{parent => self()}, Opts)}, []).
 
-connect(Host, Port) ->
+-spec connect(Opts :: v1_opts()) ->
+          {ok, Pid :: pid()} |
+          ignore |
+          {error, Error :: term()}.
+connect(#{servers := Servers0} = Opts0) ->
+    Opts = init_opts(Opts0),
+    Servers = lists:map(fun(Server) -> init_explicit_host(Server, Opts) end, Servers0),
+    start_link(finalize_server_opts(Opts#{servers := Servers})).
+
+-spec connect(Server :: nats_server_info(),
+              Opts :: v0_opts()) ->
+          {ok, Pid :: pid()} |
+          ignore |
+          {error, Error :: term()};
+             (Servers :: [nats_server_info()],
+              Opts :: v0_opts()) ->
+          {ok, Pid :: pid()} |
+          ignore |
+          {error, Error :: term()};
+             (Host :: nats_host(),
+              Port :: inet:port_number()) ->
+          {ok, Pid :: pid()} |
+          ignore |
+          {error, Error :: term()}.
+connect(#{scheme := _, host := _} = Server, Opts) when is_map(Opts) ->
+    connect([Server], Opts);
+connect(Servers, Opts) when is_list(Servers), is_map(Opts) ->
+    connect(Opts#{servers => Servers});
+connect(Host, Port) when is_integer(Port) ->
     connect(Host, Port, #{}).
 
 -spec connect(Host :: nats_host(),
               Port :: inet:port_number(),
-              Opts :: opts()) ->
+              Opts :: v0_opts()) ->
           {ok, Pid :: pid()} |
           ignore |
           {error, Error :: term()}.
-
 connect(Host, Port, Opts) ->
-    start_link(Host, Port, Opts).
+    connect(init_host_scheme(Host, Port, Opts), Opts).
 
 flush(Server) ->
     gen_statem:call(Server, flush).
@@ -312,20 +413,13 @@ endpoint(EndpDesc, Function) ->
 -spec callback_mode() -> gen_statem:callback_mode_result().
 callback_mode() -> [handle_event_function, state_enter].
 
--spec init({Host :: nats_host(),
-            Port :: inet:port_number(),
-            Opts :: opts()}) ->
+-spec init({Opts :: server_opts()}) ->
           gen_statem:init_result(connecting, data()).
-init({Host, Port, Opts0}) ->
+init({Opts}) ->
     process_flag(trap_exit, true),
 
     nats_msg:init(),
-
-    DefaultOpts = ?DEFAULT_OPTS,
-    Opts = maps:merge(DefaultOpts#{version := lib_version()}, Opts0),
-    ?LOG(debug, "SocketOpts: ~p", [socket_opts(Opts)]),
-
-    Data = init_data(Host, Port, Opts),
+    Data = init_data(Opts),
     {ok, connecting, Data}.
 
 -spec handle_event('enter',
@@ -347,46 +441,57 @@ handle_event({call, From}, disconnect, State, Data)
 handle_event({call, From}, disconnect, _State, Data) ->
     {next_state, closed, Data, [{reply, From, ok}]};
 
-handle_event(enter, _, connecting, _) ->
+handle_event(enter, _, connecting, Data) ->
     self() ! ?CONNECT_TAG,
-    keep_state_and_data;
+    {keep_state, init_connection_candidates(Data)};
 
 handle_event(info, {?CONNECT_TAG, Pid, TLS, {ok, Socket}},
-             connecting, #{host := Host, port := Port, socket := Pid} = Data) ->
+             connecting, #{server := #{host := Host, port := Port}, socket := Pid} = Data) ->
     ?LOG(debug, "NATS client connected to ~s:~w", [fmt_host(Host), Port]),
     {next_state, connected, Data#{socket := Socket, tls := TLS}};
 
 handle_event(info, {{'DOWN', ?CONNECT_TAG}, _, process, Pid, Reason},
-             connecting, #{host := Host, port := Port, socket := Pid} = Data) ->
-    ?LOG(debug, "NATS client failed to open TCP socket for connecting to ~s:~w unexpectedly with ~p",
+             connecting, #{server := #{host := Host, port := Port}, socket := Pid} = Data) ->
+    ?LOG(debug, "NATS client failed to open TCP socket for connecting to ~s:~w unexpectedly with ~0p",
          [fmt_host(Host), Port, Reason]),
     notify_parent({error, Reason}, Data),
     {next_state, closed, Data#{socket := undefined}};
 
-handle_event(info, {{'DOWN', ?CONNECT_TAG}, _, process, _, _}, _, _) ->
+handle_event(info, {{'DOWN', ?CONNECT_TAG}, _, process, _, _} = Msg, _, _) ->
+    ?LOG(debug, "Monitor Message: ~p", [Msg]),
     keep_state_and_data;
 
 handle_event(info, {?CONNECT_TAG, Pid, _, {error, _} = Error},
-             connecting, #{host := Host, port := Port, socket := Pid} = Data) ->
-    ?LOG(debug, "NATS client failed to open TCP socket for connecting to ~s:~w with ~p",
+             connecting,
+             #{server := #{host := Host, port := Port}, socket := Pid} = Data) ->
+    ?LOG(debug, "NATS client failed to open TCP socket for connecting to ~s:~w with ~0p",
          [fmt_host(Host), Port, Error]),
     notify_parent(Error, Data),
     {next_state, closed, Data#{socket := undefined}};
 
-handle_event(info, ?CONNECT_TAG, connecting, #{host := Host, port := Port} = Data) ->
-    case get_host_addr(Host) of
-        {ok, IP} ->
-            Owner = self(),
-            {Pid, _} =
-                proc_lib:spawn_opt(
-                  fun() -> async_connect(Owner, IP, Port, Data) end,
-                  [{monitor, [{tag, {'DOWN', ?CONNECT_TAG}}]}]),
-            {keep_state, Data#{socket := Pid}};
+handle_event(info, ?CONNECT_TAG, connecting, Data0) ->
+    case select_connection_candidates(Data0) of
         {error, _} = Error ->
-            ?LOG(debug, "NATS client failed to open TCP socket for connecting to ~s:~w with ~p",
-                 [fmt_host(Host), Port, Error]),
-            notify_parent(Error, Data),
-            {next_state, closed, Data}
+            notify_parent(Error, Data0),
+            %% give up
+            {next_state, closed, Data0};
+        {#{host := Host, port := Port} = Server, Data} ->
+            case get_host_addr(Host) of
+                {ok, IP} ->
+                    Owner = self(),
+                    {Pid, _} =
+                        proc_lib:spawn_opt(
+                          fun() -> async_connect(Owner, IP, Port, Data) end,
+                          [{monitor, [{tag, {'DOWN', ?CONNECT_TAG}}]}]),
+                    {keep_state, Data#{server := Server, socket := Pid}};
+                {error, _} = Error ->
+                    ?LOG(debug, "NATS client failed to open TCP socket for connecting to ~s:~w with ~p",
+                         [fmt_host(Host), Port, Error]),
+
+                    %% try again
+                    self() ! ?CONNECT_TAG,
+                    {keep_state, Data}
+            end
     end;
 
 handle_event(enter, _, closed, Data) ->
@@ -582,7 +687,7 @@ handle_event({call, From}, dump_subs, _State, #{tid := Tid}) ->
     {keep_state_and_data, [{reply, From, ets:tab2list(Tid)}]};
 
 handle_event(Event, EventContent, State, Data) ->
-    ?LOG(debug, "NATS:~nEvent: ~p~nContent: ~p~nState: ~p~nData: ~p",
+    ?LOG(debug, "NATS-#1:~nEvent: ~p~nContent: ~p~nState: ~p~nData: ~p",
          [Event, EventContent, State, Data]),
     keep_state_and_data.
 
@@ -996,7 +1101,7 @@ tls_customize_hostname_check(TlsOpts) ->
              TlsOpts]
     end.
 
-tls_opts(#{host := Host, tls_opts := TlsOpts0}) ->
+tls_opts(#{server := #{host := Host}, tls_opts := TlsOpts0}) ->
     TlsOpts1 = tls_server_name_indication(Host, TlsOpts0),
     _TlsOpts = tls_customize_hostname_check(TlsOpts1).
 
@@ -1119,7 +1224,7 @@ client_auth(#{auth_required := true}, _, _) ->
 client_auth(_, _, Nats) ->
     {ok, Nats}.
 
-log_connection_error(Error, #{host := Host, port := Port}) ->
+log_connection_error(Error, #{server := #{host := Host, port := Port}}) ->
     ?LOG(debug, "NATS connection to ~s:~w failed with ~p", [inet:ntoa(Host), Port, Error]),
     ok.
 
@@ -1231,6 +1336,88 @@ put_svc(SvcName, Id, #svc{} = Svc, #{tid := Tid}) ->
 %%% Internal functions
 %%%===================================================================
 
+init_opts(Opts) ->
+    maps:merge(?DEFAULT_OPTS, Opts).
+
+finalize_server_opts(#{default_implicit_host_preference := Pref,
+                       default_implicit_host_order := Order} = Opts0) ->
+    Scheme = case Opts0 of
+                 #{tls_first := true} -> ~"tls";
+                 _ -> ~"nats"
+             end,
+    ServerOpts =
+        #{scheme => Scheme,
+          preference => Pref,
+          order => Order,
+          explicit => false},
+    _Opts = Opts0#{default_server_opts => ServerOpts}.
+
+normalize_server(#{port := _} = Server) ->
+    Server;
+normalize_server(Server) ->
+    Server#{port => 4222}.
+
+init_explicit_host(#{scheme := _, host := _} = Server,
+                   #{default_explicit_host_preference := Pref, default_explicit_host_order := Order}) ->
+    maps:merge(#{preference => Pref, order => Order},
+               normalize_server(Server#{explicit => true})).
+
+init_host_scheme(Host, Port, #{tls_first := true}) ->
+    #{scheme => ~"tls", host => Host, port => Port};
+init_host_scheme(Host, Port, _) ->
+    #{scheme => ~"nats", host => Host, port => Port}.
+
+filter_connection_candidates(#{host := PrevHost, port := PrevPort}, Servers) ->
+    lists:filter(
+           fun(#{host := Host, port := Port}) ->
+                   Host =/= PrevHost orelse Port =/= PrevPort
+           end, Servers);
+filter_connection_candidates(_, Servers) ->
+    Servers.
+
+init_connection_candidates(#{server := Server, servers := Servers} = Data) ->
+    Candidates0 = filter_connection_candidates(Server, Servers),
+    Candidates = maps:groups_from_list(
+                    fun(#{order := Order}) -> Order end,
+                    Candidates0),
+    CandIter = maps:iterator(Candidates, ordered),
+    Data#{candidates := maps:to_list(CandIter)}.
+
+select_by_preference(L) ->
+    %% number between 0 <= Rnd <= Max
+    Total = lists:foldl(
+              fun(#{preference := Pref}, Sum) -> Sum + Pref end, 0, L),
+    Rnd = rand:uniform() * Total,
+    fun F([Last], _) ->
+            Last;
+        F([#{preference := Pref} = Server|_], Weight)
+          when Weight - Pref < 0 ->
+            Server;
+        F([#{preference := Pref}|T], Weight) ->
+            F(T, Weight - Pref)
+    end(L, Rnd).
+
+%% select candidates in increasing order, pref is use as statiscal weight for selecting
+%% see 3GPP TS 29.303, Annex C.1 for the algorithm
+select_connection_candidates(#{candidates := []}) ->
+    {error, no_more_candidates};
+select_connection_candidates(#{candidates :=
+                                   [{Order, Candidates}|NextOrderCandidates]} = Data) ->
+    case Candidates of
+        [Server] ->
+            %% last server in this order
+            {Server, Data#{candidates := NextOrderCandidates}};
+        _ ->
+            PrefL0 = lists:map(
+                       fun(#{preference := 0} = X) -> {0, X};
+                          (X) -> {rand:uniform(), X}
+                       end, Candidates),
+            PrefL = [N || {_,N} <- lists:sort(PrefL0)],
+            Server = select_by_preference(PrefL),
+            {Server, Data#{candidates :=
+                               [{Order, lists:delete(Server, Candidates)}|NextOrderCandidates]}}
+    end.
+
 async_connect(Owner, IP, Port, #{tls_first := true} = Data) ->
     Opts = socket_opts(Data) ++ tls_opts(Data),
     Result = ssl:connect(IP, Port, Opts, ?CONNECT_TIMEOUT),
@@ -1285,7 +1472,8 @@ get_host_addr(Bin) when is_binary(Bin) ->
     get_host_addr(binary_to_list(Bin));
 get_host_addr(Host) when is_list(Host); is_atom(Host) ->
     maybe
-        {error, _} ?= inet:getaddrs(Host, inet6),
+%% DON'T MERGE
+     %   {error, _} ?= inet:getaddrs(Host, inet6),
         {error, _} ?= inet:getaddrs(Host, inet)
     else
         {ok, IPs} ->
@@ -1296,8 +1484,8 @@ json_object_push(Key, Value, Acc) ->
     K = try binary_to_existing_atom(Key) catch _:_ -> Key end,
     [{K, Value} | Acc].
 
-socket_opts(Opts) ->
-    SockOpts = maps:merge(?DEFAULT_SOCKET_OPTS, maps:get(socket_opts, Opts, #{})),
+socket_opts(#{socket_opts := SockOpts0}) ->
+    SockOpts = maps:merge(?DEFAULT_SOCKET_OPTS, SockOpts0),
     maps:fold(fun make_socket_opt/3, [{active, false}, binary, {packet, 0}], SockOpts).
 
 make_socket_opt(netns, NetNs, Opts) ->
@@ -1317,9 +1505,10 @@ lib_version() ->
     {ok, VSN} = application:get_key(enats, vsn),
     iolist_to_binary(VSN).
 
--spec init_data(Host :: nats_host(), Port :: inet:port_number(), Opts :: opts()) -> data().
-init_data(Host, Port, Opts) ->
-    Data = #{socket => undefined,
+-spec init_data(Opts :: server_opts()) -> data().
+init_data(Opts) ->
+    Data = #{%version => maps:get(version, Opts, lib_version()),
+             socket => undefined,
              tls => false,
              server_info => undefined,
 
@@ -1335,8 +1524,9 @@ init_data(Host, Port, Opts) ->
              inbox => undefined,
              srv_init => false,
 
-             host => Host,
-             port => Port},
+             server => undefined,
+             candidates => []
+            },
     maps:merge(Opts, Data).
 
 notify_fun(_, #{notify := Notify})

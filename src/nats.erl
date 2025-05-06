@@ -17,7 +17,8 @@
 -behaviour(gen_statem).
 
 %% API
--export([connect/2,
+-export([connect/1,
+         connect/2,
          connect/3,
          flush/1,
          pub/2,
@@ -42,7 +43,7 @@
 %% debug functions
 -export([dump_subs/1]).
 
--ignore_xref([connect/2, connect/3,
+-ignore_xref([connect/1, connect/2, connect/3,
               flush/2,
               pub/2, pub/3, pub/4,
               sub/2, sub/3,
@@ -419,7 +420,8 @@ init({Opts}) ->
     process_flag(trap_exit, true),
 
     nats_msg:init(),
-    Data = init_data(Opts),
+    Data0 = init_data(Opts),
+    Data = init_connection_candidates(Data0),
     {ok, connecting, Data}.
 
 -spec handle_event('enter',
@@ -437,13 +439,18 @@ handle_event({call, From}, is_ready, State, _Data) ->
 
 handle_event({call, From}, disconnect, State, Data)
   when State =:= connected; is_record(State, ready) ->
-    {next_state, closed, close_socket(Data), [{reply, From, ok}]};
+    handle_socket_closed(close_socket(Data), [{reply, From, ok}]);
 handle_event({call, From}, disconnect, _State, Data) ->
-    {next_state, closed, Data, [{reply, From, ok}]};
+    handle_socket_closed(Data, [{reply, From, ok}]);
 
-handle_event(enter, _, connecting, Data) ->
+handle_event(enter, OldState, connecting, Data)
+  when is_record(OldState, ready) ->
+    %% re-initialize the connection candiates when we had a working connection before
     self() ! ?CONNECT_TAG,
     {keep_state, init_connection_candidates(Data)};
+handle_event(enter, _, connecting, _Data) ->
+    self() ! ?CONNECT_TAG,
+    keep_state_and_data;
 
 handle_event(info, {?CONNECT_TAG, Pid, TLS, {ok, Socket}},
              connecting, #{server := #{host := Host, port := Port}, socket := Pid} = Data) ->
@@ -455,7 +462,7 @@ handle_event(info, {{'DOWN', ?CONNECT_TAG}, _, process, Pid, Reason},
     ?LOG(debug, "NATS client failed to open TCP socket for connecting to ~s:~w unexpectedly with ~0p",
          [fmt_host(Host), Port, Reason]),
     notify_parent({error, Reason}, Data),
-    {next_state, closed, Data#{socket := undefined}};
+    handle_socket_closed(Data#{socket := undefined}, []);
 
 handle_event(info, {{'DOWN', ?CONNECT_TAG}, _, process, _, _} = Msg, _, _) ->
     ?LOG(debug, "Monitor Message: ~p", [Msg]),
@@ -467,14 +474,14 @@ handle_event(info, {?CONNECT_TAG, Pid, _, {error, _} = Error},
     ?LOG(debug, "NATS client failed to open TCP socket for connecting to ~s:~w with ~0p",
          [fmt_host(Host), Port, Error]),
     notify_parent(Error, Data),
-    {next_state, closed, Data#{socket := undefined}};
+    handle_socket_closed(Data#{socket := undefined}, []);
 
 handle_event(info, ?CONNECT_TAG, connecting, Data0) ->
     case select_connection_candidates(Data0) of
         {error, _} = Error ->
             notify_parent(Error, Data0),
             %% give up
-            {next_state, closed, Data0};
+            handle_socket_closed(Data0, []);
         {#{host := Host, port := Port} = Server, Data} ->
             case get_host_addr(Host) of
                 {ok, IP} ->
@@ -494,10 +501,6 @@ handle_event(info, ?CONNECT_TAG, connecting, Data0) ->
             end
     end;
 
-handle_event(enter, _, closed, Data) ->
-    notify_parent(closed, Data),
-    {stop, normal};
-
 handle_event(enter, _, connected, #{socket := Socket} = Data) ->
     ?LOG(debug, "NATS enter connected state, socket ~p", [Socket]),
     ok = setopts(Data, [{active,once}]),
@@ -514,21 +517,20 @@ handle_event(enter, _, State, _Data)
 
 handle_event(info, {tcp_error, Socket, Reason}, _, #{socket := Socket} = Data) ->
     log_connection_error(Reason, Data),
-    {next_state, closed, close_socket(Data)};
+    handle_socket_closed(close_socket(Data), []);
 handle_event(info, {tcp_closed, Socket}, _, #{socket := Socket} = Data) ->
-    {next_state, closed, close_socket(Data)};
+    handle_socket_closed(close_socket(Data), []);
 
 handle_event(info, {tcp, Socket, Bin}, State, #{socket := Socket} = Data)
   when State =:= connected; is_record(State, ready) ->
     ?LOG(debug, "got data: ~p", [Bin]),
     handle_message(Bin, State, Data);
 
-
 handle_event(info, {ssl_error, Socket, Reason}, _, #{socket := Socket} = Data) ->
     log_connection_error(Reason, Data),
-    {next_state, closed, close_socket(Data)};
+    handle_socket_closed(close_socket(Data), []);
 handle_event(info, {ssl_closed, Socket}, _, #{socket := Socket} = Data) ->
-    {next_state, closed, close_socket(Data)};
+    handle_socket_closed(close_socket(Data), []);
 
 handle_event(info, {ssl, Socket, Bin}, State, #{socket := Socket} = Data)
   when State =:= connected; is_record(State, ready) ->
@@ -713,6 +715,10 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %%%===================================================================
 %%% State Helper functions
 %%%===================================================================
+
+handle_socket_closed(Data, Actions) ->
+    notify_parent(closed, Data),
+    {next_state, connecting, Data, Actions}.
 
 service_sub_msg(SvcName, Op, Id, Subject, Data) ->
     service_sub_msg(SvcName, Op, Id, Subject, undefined, Data).
@@ -1381,7 +1387,7 @@ init_connection_candidates(#{server := Server, servers := Servers} = Data) ->
                     fun(#{order := Order}) -> Order end,
                     Candidates0),
     CandIter = maps:iterator(Candidates, ordered),
-    Data#{candidates := maps:to_list(CandIter)}.
+    Data#{server := undefined, candidates := maps:to_list(CandIter)}.
 
 select_by_preference(L) ->
     %% number between 0 <= Rnd <= Max

@@ -43,7 +43,8 @@ all() ->
      unsub_verbose_ok,
      request_no_responders,
      micro_ok,
-     micro_verbose_ok].
+     micro_verbose_ok,
+     multi_server_reconnect].
 
 init_per_suite(Config) ->
     Level = ct:get_config(log_level, info),
@@ -275,6 +276,136 @@ micro_verbose_ok(_) ->
     after 1000 ->
             ok
     end.
+
+multi_server_reconnect_server(Owner) ->
+    {ok, S1} = nats_fake_server:start_link(),
+    {ok, S2} = nats_fake_server:start_link(),
+
+    Server = #{scheme => ~"nats", host => ~"localhost"},
+    Server1 = Server#{port => nats_fake_server:port(S1)},
+    Server2 = Server#{port => nats_fake_server:port(S2)},
+    Owner ! {ready, self(), [Server1, Server2]},
+    multi_server_reconnect_server_loop(Owner, undefined).
+
+multi_server_reconnect_server_loop(Owner, Connected) ->
+    receive
+        {closed, Pid, Socket} when Connected =:= {Pid, Socket} ->
+            Owner ! {closed, self(), Pid, Socket},
+            multi_server_reconnect_server_loop(Owner, undefined);
+        {accepted, Pid, Socket} when Connected =:= undefined ->
+            Info =
+                #{server_id => ~"Server-Id",
+                  server_name => ~"Server-Name",
+                  version => ~"2.11.0",
+                  proto => 1,
+                  go => ~"go1.24.1",
+                  host => ~"0.0.0.0",
+                  port => 4222,
+                  headers => true,
+                  max_payload => 1048576,
+                  jetstream => true
+                 },
+            Msg = iolist_to_binary([~"INFO ", json:encode(Info), ~"\r\n"]),
+            nats_fake_server:send(Pid, Socket, Msg),
+            multi_server_reconnect_server_loop(Owner, {Pid, Socket});
+        {recv, Pid, Socket, Data} when Connected =:= {Pid, Socket} ->
+            case Data of
+                <<"CONNECT ", _/binary>> ->
+                    Owner ! {connected, self(), Pid, Socket};
+                _ ->
+                    ok
+            end,
+            multi_server_reconnect_server_loop(Owner, Connected);
+        Msg ->
+            ct:pal("got unexpected msg: ~0p", [Msg]),
+            error(exit)
+    end.
+
+multi_server_reconnect(_) ->
+    logger:set_primary_config(level, debug),
+    SPid = proc_lib:spawn_link(?MODULE, multi_server_reconnect_server, [self()]),
+
+    Servers =
+        receive {ready, SPid, S} -> S
+        after 1000 -> throw(servers_not_ready)
+        end,
+
+    {ok, C} = nats:connect(#{servers => Servers, verbose => false}),
+    receive {C, ready} -> ok
+    after 1000 -> throw(ready_msg_not_sent)
+    end,
+
+    %% connect message from our test server loop
+    {connected, _, Srv1Pid, Srv1Socket} =
+        receive {connected, SPid, _, _} = Msg1 -> Msg1
+        after 1000 -> throw(connected_msg_not_sent)
+        end,
+
+    %% let it settle
+    ct:sleep(10),
+
+    %% kill the socket on the test server
+    nats_fake_server:close(Srv1Pid, Srv1Socket),
+
+    %% close message from our test server loop
+    {closed, _, Srv1Pid, Srv1Socket} =
+        receive {closed, SPid, _, _} = Msg2 -> Msg2
+        after 1000 -> throw(close_msg_not_sent)
+        end,
+
+    %% closed
+    receive {C, closed} -> ok
+    after 1000 -> throw(closed_msg_not_sent)
+    end,
+
+    %% reconnected
+    receive {C, ready} -> ok
+    after 1000 -> throw(ready_msg_not_sent)
+    end,
+
+    %% reconnect message from our test server loop
+    {connected, _, Srv2Pid, Srv2Socket} =
+        receive {connected, SPid, _, _} = Msg3 -> Msg3
+        after 1000 -> throw(connected_msg_not_sent)
+        end,
+
+    %% it should have connected to the other test server socket
+    ?assertNotEqual(Srv1Pid, Srv2Pid),
+
+    %% kill the socket on the test server
+    nats_fake_server:close(Srv2Pid, Srv2Socket),
+
+    %% close message from our test server loop
+    {closed, _, Srv2Pid, Srv2Socket} =
+        receive {closed, SPid, _, _} = Msg4 -> Msg4
+        after 1000 -> throw(close_msg_not_sent)
+        end,
+
+    %% closed
+    receive {C, closed} -> ok
+    after 1000 -> throw(closed_msg_not_sent)
+    end,
+
+    %% reconnected
+    receive {C, ready} -> ok
+    after 1000 -> throw(ready_msg_not_sent)
+    end,
+
+    %% reconnect message from our test server loop
+    {connected, _, Srv3Pid, _Srv2Socket} =
+        receive {connected, SPid, _, _} = Msg5 -> Msg5
+        after 1000 -> throw(connected_msg_not_sent)
+        end,
+
+    %% it should now be back on the first test server socket
+    ?assertEqual(Srv1Pid, Srv3Pid),
+
+    receive Msg99 ->
+            ct:pal("got unexpected message: ~0p\n", [Msg99]),
+            throw(unexpected_message)
+    after 1000 -> ok
+    end,
+    ok.
 
 send_tcp_msg(BinHost, Port, BinMsg) ->
     Host = binary_to_list(BinHost),

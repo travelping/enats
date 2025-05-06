@@ -439,10 +439,11 @@ handle_event({call, From}, is_ready, State, _Data) ->
 
 handle_event({call, From}, disconnect, State, Data)
   when State =:= connected; is_record(State, ready) ->
-    handle_socket_closed(close_socket(Data), [{reply, From, ok}]);
+    notify_parent(closed, Data),
+    {stop_and_reply, normal, [{reply, From, ok}], close_socket(Data)};
 handle_event({call, From}, disconnect, _State, Data) ->
-    handle_socket_closed(Data, [{reply, From, ok}]);
-
+    notify_parent(closed, Data),
+    {stop_and_reply, normal, [{reply, From, ok}], Data};
 handle_event(enter, OldState, connecting, Data)
   when is_record(OldState, ready) ->
     %% re-initialize the connection candiates when we had a working connection before

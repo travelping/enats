@@ -459,6 +459,21 @@ multi_server_reconnect(_) ->
     %% there should be no more pending messages
     ?assertNoMessage(1000),
 
+    %% activate a microserver with its subscriptions
+    Svc = #{name => ~"FOOBAR",
+            version => ~"2.0.0",
+            module => ?MODULE,
+            state => [],
+            endpoints =>
+                [#{name => ~"echo", function => echo}]},
+    ok = nats_service:serve(C, Svc),
+
+    %% should result in 10 additional subscriptions
+    multi_server_reconnect_collect_subs(10, SPid, []),
+
+    %% there should be no more pending messages
+    ?assertNoMessage(1000),
+
     %% subscription should still work
     nats_fake_server:send(Srv2Pid, Srv2Socket, SendMsg1),
     receive {C, NatsSid1, {msg, _, _, _}} -> ok
@@ -497,13 +512,14 @@ multi_server_reconnect(_) ->
     ?assertEqual(Srv1Pid, Srv3Pid),
 
     %% collect the sub, unsub, sub restoration messages from the fake server
-    Subs3 = multi_server_reconnect_collect_subs(4, SPid, []),
+    Subs3 = multi_server_reconnect_collect_subs(14, SPid, []),
     %% ct:pal("Srv3Pid: ~p~nSrv3Socket: ~p", [Srv3Pid, Srv3Socket]),
     ?assertMatch(
        [{sub, {~"foo.*", _, _}, {Srv3Pid, Srv3Socket}},
         {unsub, {_, 998}, {Srv3Pid, Srv3Socket}},
         {sub, {<<"zzz.*">>, _ , _}, {Srv3Pid, Srv3Socket}},
         {sub, {<<"_INBOX.", _/binary>>, _, _}, {Srv3Pid, Srv3Socket}}
+        | _
        ],
        Subs3),
 

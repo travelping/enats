@@ -541,7 +541,10 @@ handle_event(enter, OldState, State, #{socket := _} = Data)
                   [nats_msg:sub(Subject, QueueGrp, NatsSid) | Acc];
              ([Sid, #inbox{subject = Subject}], Acc) ->
                   NatsSid = integer_to_binary(Sid),
-                  [nats_msg:sub(Subject, NatsSid) | Acc]
+                  [nats_msg:sub(Subject, NatsSid) | Acc];
+             ([Sid, #service{subject = Subject, queue_group = QueueGrp}], Acc) ->
+                  NatsSid = integer_to_binary(Sid),
+                  [nats_msg:sub(Subject, QueueGrp, NatsSid) | Acc]
           end, [], Subs),
 
     {keep_state, enqueue_msg(SubMsgs, Data)};

@@ -245,6 +245,14 @@
                   _              => _
                  }.
 
+-export_type([sid/0, notify_fun/0]).
+
+-opaque sid() :: {'$sid', integer()}.
+-type notify_fun() :: fun((Sid :: sid(),
+                           Subject :: binary(),
+                           Payload :: binary(),
+                           MsgOpts :: map()) -> any()).
+
 -record(nats_req, {conn     :: pid(),
                    svc      :: binary(),
                    id       :: binary(),
@@ -252,9 +260,14 @@
                   }).
 -record(pid, {pid}).
 -record(sub, {owner, sid}).
--record(sub_session, {owner, notify, max_msgs}).
+-record(sub_session, {owner    :: pid(),
+                      type     :: 'sub' | 'unsub',
+                      subject  :: binary(),
+                      queue_group :: undefined | binary(),
+                      notify   :: notify_fun(),
+                      max_msgs :: integer()}).
 -record(ready, {pending}).
--record(inbox, {}).
+-record(inbox, {subject :: binary()}).
 -record(req, {req_id}).
 -record(svc_id, {name, id}).
 -record(service, {svc, op, endp, queue_group, subject}).
@@ -508,12 +521,34 @@ handle_event(enter, _, connected, #{socket := Socket} = Data) ->
     keep_state_and_data;
 handle_event(enter, OldState, State, #{socket := _} = Data)
   when not is_record(OldState, ready), is_record(State, ready) ->
-    %% OldState =:= State =:= #ready{} could only happen if repeat_state was used,
-    %% but better to be safe
     ?LOG(debug, "NATS enter ready state"),
     ok = setopts(Data, [{active, true}]),
     notify_parent(ready, Data),
-    keep_state_and_data;
+
+    Subs = get_sub_sessions_reverse(Data),
+    SubMsgs =
+        lists:foldl(
+          fun([Sid, #sub_session{type = Type, subject = Subject,
+                                 queue_group = QueueGrp, max_msgs = MaxMsgs}], Acc0) ->
+                  NatsSid = integer_to_binary(Sid),
+                  Acc =
+                      case Type of
+                          unsub ->
+                              [nats_msg:unsub(NatsSid, MaxMsgs) | Acc0];
+                          _ ->
+                              Acc0
+                      end,
+                  [nats_msg:sub(Subject, QueueGrp, NatsSid) | Acc];
+             ([Sid, #inbox{subject = Subject}], Acc) ->
+                  NatsSid = integer_to_binary(Sid),
+                  [nats_msg:sub(Subject, NatsSid) | Acc]
+          end, [], Subs),
+
+    {keep_state, enqueue_msg(SubMsgs, Data)};
+
+handle_event(enter, _, State, _Data)
+  when is_record(State, ready) ->
+   keep_state_and_data;
 
 handle_event(info, {tcp_error, Socket, Reason}, _, #{socket := Socket} = Data) ->
     log_connection_error(Reason, Data),
@@ -578,11 +613,10 @@ handle_event({call, From}, {pub, Subject, Payload, Opts}, State, Data) ->
 
 handle_event({call, From}, {sub, Subject, Owner, Opts}, State, Data) ->
     {NatsSid, Sid} = make_sub_id(Data),
+    QueueGrp = maps:get(queue_group, Opts, undefined),
     monitor_owner_sub(Owner, Data),
     put_owner_sub(Owner, Sid, Data),
-    put_sid_session(Sid, Owner, notify_fun(Owner, Opts), 0, Data),
-
-    QueueGrp = maps:get(queue_group, Opts, undefined),
+    put_sid_session(Sid, Owner, Subject, QueueGrp, notify_fun(Owner, Opts), 0, Data),
     Msg = nats_msg:sub(Subject, QueueGrp, NatsSid),
     send_msg_with_reply(From, {ok, Sid}, Msg, State, Data);
 
@@ -591,7 +625,8 @@ handle_event({call, From}, {unsub, {'$sid', NatsSid} = Sid, Opts}, State, Data) 
         [#sub_session{owner = Owner} = Session] ->
             case Opts of
                 #{max_messages := MaxMsgsOpt} when is_integer(MaxMsgsOpt) ->
-                    put_sid_session(Sid, Session#sub_session{max_msgs = MaxMsgsOpt}, Data);
+                    put_sid_session(
+                      Sid, Session#sub_session{type = unsub, max_msgs = MaxMsgsOpt}, Data);
                 _ ->
                     del_sid(Sid, Data),
                     del_owner_sub(Owner, Sid, Data),
@@ -612,10 +647,11 @@ handle_event({call, From}, get_inbox_topic, _State, #{inbox := Inbox})
     {keep_state_and_data, [{reply, From, {ok, Inbox}}]};
 handle_event({call, From}, get_inbox_topic, State, Data) ->
     Inbox = <<"_INBOX.", (rnd_topic_id())/binary, $.>>,
-    {NatsSid, Sid} = make_sub_id(Data),
-    put_sid_inbox(Sid, Data),
-
     Subject = <<Inbox/binary, $*>>,
+
+    {NatsSid, Sid} = make_sub_id(Data),
+    put_sid_inbox(Sid, Subject, Data),
+
     Msg = nats_msg:sub(Subject, NatsSid),
     send_msg_with_reply(From, {ok, Inbox}, Msg, State, Data#{inbox => Inbox});
 
@@ -1308,12 +1344,23 @@ put_sid_session(Sid, #sub_session{} = Session, #{tid := Tid}) ->
     Obj = {Sid, Session},
     true = ets:insert(Tid, Obj).
 
-put_sid_session(Sid, Owner, Notify, MaxMsgs, #{tid := Tid}) ->
-    Obj = {Sid, #sub_session{owner = Owner, notify = Notify, max_msgs = MaxMsgs}},
-    true = ets:insert(Tid, Obj).
+put_sid_session(Sid, Owner, Subject, QueueGroup, Notify, MaxMsgs, #{tid := Tid}) ->
+    Session = #sub_session{
+                 owner = Owner,
+                 type = sub,
+                 subject = Subject,
+                 queue_group = QueueGroup,
+                 notify = Notify,
+                 max_msgs = MaxMsgs
+                },
+    true = ets:insert(Tid, {Sid, Session}).
 
-put_sid_inbox(Sid, #{tid := Tid}) ->
-    true = ets:insert(Tid, {Sid, #inbox{}}).
+get_sub_sessions_reverse(#{tid := Tid}) ->
+    Ms = [{{{'$sid', '$1'}, '$2'}, [], ['$$']}],
+    ets:select_reverse(Tid, Ms).
+
+put_sid_inbox(Sid, Subject, #{tid := Tid}) ->
+    true = ets:insert(Tid, {Sid, #inbox{subject = Subject}}).
 
 put_sid_service(Sid, #service{} = Svc, #{tid := Tid}) ->
     true = ets:insert(Tid, {Sid, Svc}).
@@ -1529,7 +1576,7 @@ init_data(Opts) ->
              batch_size => 0,
              batch_timer => undefined,
 
-             tid => ets:new(?MODULE, [private, set]),
+             tid => ets:new(?MODULE, [private, ordered_set]),
 
              inbox => undefined,
              srv_init => false,

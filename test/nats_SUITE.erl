@@ -311,15 +311,20 @@ multi_server_reconnect_server_loop(Owner, Connected) ->
             nats_fake_server:send(Pid, Socket, Msg),
             multi_server_reconnect_server_loop(Owner, {Pid, Socket});
         {recv, Pid, Socket, Data} when Connected =:= {Pid, Socket} ->
-            try nats_msg:decode(Data) of
-                {{connect, _ClientInfo}, _} ->
-                    Owner ! {connected, self(), Pid, Socket};
-                {{sub, Sub}, _} ->
-                    ct:pal("NATS-Sub: ~0p", [nats_msg:decode(Data)]),
-                    Owner ! {sub, self(), Pid, Socket, Sub};
-                {Msg, _} ->
-                    ct:pal("NATS-Server Msg: ~0p", [Msg]),
-                    ok
+            try nats_msg:decode_all(Data) of
+                {Msgs, <<>>} ->
+                    lists:foreach(
+                      fun({connect, _ClientInfo}) ->
+                              Owner ! {connected, self(), Pid, Socket};
+                         ({sub, Sub}) ->
+                              ct:pal("NATS-SUB: ~0p", [Sub]),
+                              Owner ! {sub, self(), Pid, Socket, Sub};
+                         ({unsub, Unsub}) ->
+                              ct:pal("NATS-UNSUB: ~0p", [Unsub]),
+                              Owner ! {unsub, self(), Pid, Socket, Unsub};
+                         (Msg) ->
+                              ct:pal("NATS-Server Msg: ~0p", [Msg])
+                      end, Msgs)
             catch
                 C:E:St ->
                     ct:pal("NATS decode error: ~p:~p~nStack: ~p~nMsg: ~0p", [C, E, St, Data])
@@ -330,15 +335,34 @@ multi_server_reconnect_server_loop(Owner, Connected) ->
             error(exit)
     end.
 
-assertNoMessage(Wait) ->
-    receive Msg ->
-            ct:pal("got unexpected message: ~0p", [Msg]),
-            throw(unexpected_message)
-    after Wait -> ok
+-define(assertNoMessage(X_Wait),
+        begin
+          ((fun() ->
+                    receive X_M ->
+                            ct:pal("got unexpected message: ~0p", [X_M]),
+                            throw(unexpected_message)
+                    after X_Wait -> ok
+                    end
+            end)())
+        end).
+
+multi_server_reconnect_collect_subs(0, _, Acc) ->
+    lists:reverse(Acc);
+multi_server_reconnect_collect_subs(Cnt, SPid, Acc) ->
+    receive
+        {Tag, SPid, Pid, Socket, Msg}
+          when Tag =:= sub; Tag =:= unsub ->
+            multi_server_reconnect_collect_subs(
+              Cnt - 1, SPid, [{Tag, Msg, {Pid, Socket}}|Acc])
+    after 10_000 -> throw(sub_msg_not_received)
     end.
 
 multi_server_reconnect(_) ->
-    logger:set_primary_config(level, debug),
+    %% the test sequence can be slightly hard to follow as it gets messages from
+    %% nats client and from the test server. However, interleaving them in a single
+    %% sequential flow is much simpler for the test than having to synchronize
+    %% multiple processes.
+
     SPid = proc_lib:spawn_link(?MODULE, multi_server_reconnect_server, [self()]),
 
     Servers =
@@ -358,25 +382,40 @@ multi_server_reconnect(_) ->
         end,
 
     %% there should be no pending messages
-    assertNoMessage(1000),
+    ?assertNoMessage(1000),
 
-    {ok, NatsSid} = nats:sub(C, ~"foo.*"),
+    %% send a sequence, of SUB foo.*, UNSUB Sid MaxMsgs, SUB zzz.*
+    {ok, NatsSid1} = nats:sub(C, ~"foo.*"),
+    ok = nats:unsub(C, NatsSid1, #{max_messages => 1000}),
+    {ok, _NatsSid2} = nats:sub(C, ~"zzz.*"),
 
-    {sub, _, Srv1Pid, Srv1Socket, {_, _, BinSid}} =
-        receive {sub, SPid, _, _, _} = SubMsg1 -> SubMsg1
-        after 1000 -> throw(sub_msg_not_sent)
-        end,
+    %% activate the inbox subscription, cheat and call the server directly
+    %% we could instead do a nats:request(), but that would make it more complex
+    {ok, _Inbox} = gen_statem:call(C, get_inbox_topic),
 
+    %% collect the sub, unsub, sub from the fake server
+    Subs1 = multi_server_reconnect_collect_subs(4, SPid, []),
+    ?assertMatch(
+       [{sub, {~"foo.*", _, _}, {Srv1Pid, Srv1Socket}},
+        {unsub, {_, 1000}, {Srv1Pid, Srv1Socket}},
+        {sub, {<<"zzz.*">>, _ , _}, {Srv1Pid, Srv1Socket}},
+        {sub, {<<"_INBOX.", _/binary>>, _, _}, {Srv1Pid, Srv1Socket}}
+       ],
+       Subs1),
+    {_, {_, _, BinSid}, _} = hd(Subs1),
+
+    %% set a msg ...
     SendMsg1 = nats_msg:encode({msg, {~"foo.bar", BinSid, undefined, ~"Hello"}}),
     ct:pal("SendMsg1: ~0p", [SendMsg1]),
     nats_fake_server:send(Srv1Pid, Srv1Socket, SendMsg1),
 
-    receive {C, NatsSid, {msg, _, _, _}} -> ok
+    %% ... and check that the subscription works
+    receive {C, NatsSid1, {msg, _, _, _}} -> ok
     after 1000 -> throw(sub_msg_not_received)
     end,
 
-    %% there should be no pending messages
-    assertNoMessage(1000),
+    %% there should be no more pending messages
+    ?assertNoMessage(1000),
 
     %% kill the socket on the test server
     nats_fake_server:close(Srv1Pid, Srv1Socket),
@@ -392,7 +431,7 @@ multi_server_reconnect(_) ->
     after 1000 -> throw(closed_msg_not_sent)
     end,
 
-    %% reconnected
+    %% wait for the reconnect
     receive {C, ready} -> ok
     after 1000 -> throw(ready_msg_not_sent)
     end,
@@ -405,6 +444,29 @@ multi_server_reconnect(_) ->
 
     %% it should have connected to the other test server socket
     ?assertNotEqual(Srv1Pid, Srv2Pid),
+
+    %% collect the sub, unsub, sub restoration messages from the fake server
+    Subs2 = multi_server_reconnect_collect_subs(4, SPid, []),
+    %% ct:pal("Srv2Pid: ~p~nSrv2Socket: ~p", [Srv2Pid, Srv2Socket]),
+    ?assertMatch(
+       [{sub, {~"foo.*", _, _}, {Srv2Pid, Srv2Socket}},
+        {unsub, {_, 999}, {Srv2Pid, Srv2Socket}},
+        {sub, {<<"zzz.*">>, _ , _}, {Srv2Pid, Srv2Socket}},
+        {sub, {<<"_INBOX.", _/binary>>, _, _}, {Srv2Pid, Srv2Socket}}
+       ],
+       Subs2),
+
+    %% there should be no more pending messages
+    ?assertNoMessage(1000),
+
+    %% subscription should still work
+    nats_fake_server:send(Srv2Pid, Srv2Socket, SendMsg1),
+    receive {C, NatsSid1, {msg, _, _, _}} -> ok
+    after 1000 -> throw(sub_msg_not_received)
+    end,
+
+    %% there should be no more pending messages
+    ?assertNoMessage(1000),
 
     %% kill the socket on the test server
     nats_fake_server:close(Srv2Pid, Srv2Socket),
@@ -420,13 +482,13 @@ multi_server_reconnect(_) ->
     after 1000 -> throw(closed_msg_not_sent)
     end,
 
-    %% reconnected
+    %% wait for the reconnect
     receive {C, ready} -> ok
     after 1000 -> throw(ready_msg_not_sent)
     end,
 
     %% reconnect message from our test server loop
-    {connected, _, Srv3Pid, _Srv2Socket} =
+    {connected, _, Srv3Pid, Srv3Socket} =
         receive {connected, SPid, _, _} = Msg5 -> Msg5
         after 1000 -> throw(connected_msg_not_sent)
         end,
@@ -434,8 +496,37 @@ multi_server_reconnect(_) ->
     %% it should now be back on the first test server socket
     ?assertEqual(Srv1Pid, Srv3Pid),
 
-    %% there should be no pending messages
-    assertNoMessage(1000),
+    %% collect the sub, unsub, sub restoration messages from the fake server
+    Subs3 = multi_server_reconnect_collect_subs(4, SPid, []),
+    %% ct:pal("Srv3Pid: ~p~nSrv3Socket: ~p", [Srv3Pid, Srv3Socket]),
+    ?assertMatch(
+       [{sub, {~"foo.*", _, _}, {Srv3Pid, Srv3Socket}},
+        {unsub, {_, 998}, {Srv3Pid, Srv3Socket}},
+        {sub, {<<"zzz.*">>, _ , _}, {Srv3Pid, Srv3Socket}},
+        {sub, {<<"_INBOX.", _/binary>>, _, _}, {Srv3Pid, Srv3Socket}}
+       ],
+       Subs3),
+
+    %% there should be no more pending messages
+    ?assertNoMessage(1000),
+
+    %% disconnect should be clean
+    ok = nats:disconnect(C),
+    {error, not_found} = nats:is_ready(C),
+
+    %% closed
+    receive {C, closed} -> ok
+    after 1000 -> throw(closed_msg_not_sent)
+    end,
+
+    %% close message from our test server loop
+    {closed, _, Srv3Pid, Srv3Socket} =
+        receive {closed, SPid, _, _} = Msg6 -> Msg6
+        after 1000 -> throw(close_msg_not_sent)
+        end,
+
+    %% there should be no more pending messages
+    ?assertNoMessage(1000),
 
     ok.
 

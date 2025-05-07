@@ -168,11 +168,14 @@ init_socket(Socket) ->
 read(Socket, #{select := Handle} = Info, #state{owner = Owner} = State) ->
     case socket:recv(Socket, 0, [], Handle) of
         {select, {select_info, recv, SelectHandle}} ->
+            ?LOG(debug, "recv select ~0p", [SelectHandle]),
             {ok, Info#{select := SelectHandle}};
         {ok, Data} ->
             Owner ! {recv, self(), Socket, Data},
+            ?LOG(debug, "read data ~0p", [Data]),
             read(Socket, Info, State);
         {error, _} = Error ->
+            ?LOG(debug, "read error ~0p", [Error]),
             Error
     end.
 

@@ -508,12 +508,11 @@ handle_event(enter, _, connected, #{socket := Socket} = Data) ->
     keep_state_and_data;
 handle_event(enter, OldState, State, #{socket := _} = Data)
   when not is_record(OldState, ready), is_record(State, ready) ->
+    %% OldState =:= State =:= #ready{} could only happen if repeat_state was used,
+    %% but better to be safe
     ?LOG(debug, "NATS enter ready state"),
     ok = setopts(Data, [{active, true}]),
     notify_parent(ready, Data),
-    keep_state_and_data;
-handle_event(enter, _, State, _Data)
-  when is_record(State, ready) ->
     keep_state_and_data;
 
 handle_event(info, {tcp_error, Socket, Reason}, _, #{socket := Socket} = Data) ->
@@ -589,10 +588,10 @@ handle_event({call, From}, {sub, Subject, Owner, Opts}, State, Data) ->
 
 handle_event({call, From}, {unsub, {'$sid', NatsSid} = Sid, Opts}, State, Data) ->
     case get_sid(Sid, Data) of
-        [#sub_session{owner = Owner, notify = Notify}] ->
+        [#sub_session{owner = Owner} = Session] ->
             case Opts of
                 #{max_messages := MaxMsgsOpt} when is_integer(MaxMsgsOpt) ->
-                    put_sid_session(Sid, Owner, Notify, MaxMsgsOpt, Data);
+                    put_sid_session(Sid, Session#sub_session{max_msgs = MaxMsgsOpt}, Data);
                 _ ->
                     del_sid(Sid, Data),
                     del_owner_sub(Owner, Sid, Data),
@@ -842,7 +841,7 @@ reply_opt(_, Opts) ->
 handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, {_, Data} = DecState) ->
     Sid = {'$sid', binary_to_integer(NatsSid)},
     case get_sid(Sid, Data) of
-        [#sub_session{owner = Owner, notify = Notify, max_msgs = MaxMsgs}] ->
+        [#sub_session{owner = Owner, notify = Notify, max_msgs = MaxMsgs} = Session] ->
             Notify(Sid, Subject, Payload, Opts),
 
             case MaxMsgs of
@@ -855,7 +854,7 @@ handle_nats_msg_msg(Subject, NatsSid, Payload, Opts, {_, Data} = DecState) ->
                     del_owner_sub(Owner, Sid, Data),
                     demonitor_owner_sub(Owner, Data);
                 _ ->
-                    put_sid_session(Sid, Owner, Notify, MaxMsgs - 1, Data)
+                    put_sid_session(Sid, Session#sub_session{max_msgs = MaxMsgs - 1}, Data)
             end,
             {continue, DecState};
         [#inbox{}] ->
@@ -1304,6 +1303,10 @@ del_owner_subs(Owner, #{tid := Tid}) ->
 count_owner_subs(Owner, #{tid := Tid}) ->
     Ms = [{{#sub{owner = Owner, _ = '_'}}, [], [true]}],
     ets:select_count(Tid,  Ms).
+
+put_sid_session(Sid, #sub_session{} = Session, #{tid := Tid}) ->
+    Obj = {Sid, Session},
+    true = ets:insert(Tid, Obj).
 
 put_sid_session(Sid, Owner, Notify, MaxMsgs, #{tid := Tid}) ->
     Obj = {Sid, #sub_session{owner = Owner, notify = Notify, max_msgs = MaxMsgs}},

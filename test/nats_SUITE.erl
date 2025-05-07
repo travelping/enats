@@ -278,6 +278,8 @@ micro_verbose_ok(_) ->
     end.
 
 multi_server_reconnect_server(Owner) ->
+    nats_msg:init(),
+
     {ok, S1} = nats_fake_server:start_link(),
     {ok, S2} = nats_fake_server:start_link(),
 
@@ -309,16 +311,30 @@ multi_server_reconnect_server_loop(Owner, Connected) ->
             nats_fake_server:send(Pid, Socket, Msg),
             multi_server_reconnect_server_loop(Owner, {Pid, Socket});
         {recv, Pid, Socket, Data} when Connected =:= {Pid, Socket} ->
-            case Data of
-                <<"CONNECT ", _/binary>> ->
+            try nats_msg:decode(Data) of
+                {{connect, _ClientInfo}, _} ->
                     Owner ! {connected, self(), Pid, Socket};
-                _ ->
+                {{sub, Sub}, _} ->
+                    ct:pal("NATS-Sub: ~0p", [nats_msg:decode(Data)]),
+                    Owner ! {sub, self(), Pid, Socket, Sub};
+                {Msg, _} ->
+                    ct:pal("NATS-Server Msg: ~0p", [Msg]),
                     ok
+            catch
+                C:E:St ->
+                    ct:pal("NATS decode error: ~p:~p~nStack: ~p~nMsg: ~0p", [C, E, St, Data])
             end,
             multi_server_reconnect_server_loop(Owner, Connected);
         Msg ->
             ct:pal("got unexpected msg: ~0p", [Msg]),
             error(exit)
+    end.
+
+assertNoMessage(Wait) ->
+    receive Msg ->
+            ct:pal("got unexpected message: ~0p", [Msg]),
+            throw(unexpected_message)
+    after Wait -> ok
     end.
 
 multi_server_reconnect(_) ->
@@ -341,8 +357,26 @@ multi_server_reconnect(_) ->
         after 1000 -> throw(connected_msg_not_sent)
         end,
 
-    %% let it settle
-    ct:sleep(10),
+    %% there should be no pending messages
+    assertNoMessage(1000),
+
+    {ok, NatsSid} = nats:sub(C, ~"foo.*"),
+
+    {sub, _, Srv1Pid, Srv1Socket, {_, _, BinSid}} =
+        receive {sub, SPid, _, _, _} = SubMsg1 -> SubMsg1
+        after 1000 -> throw(sub_msg_not_sent)
+        end,
+
+    SendMsg1 = nats_msg:encode({msg, {~"foo.bar", BinSid, undefined, ~"Hello"}}),
+    ct:pal("SendMsg1: ~0p", [SendMsg1]),
+    nats_fake_server:send(Srv1Pid, Srv1Socket, SendMsg1),
+
+    receive {C, NatsSid, {msg, _, _, _}} -> ok
+    after 1000 -> throw(sub_msg_not_received)
+    end,
+
+    %% there should be no pending messages
+    assertNoMessage(1000),
 
     %% kill the socket on the test server
     nats_fake_server:close(Srv1Pid, Srv1Socket),
@@ -400,11 +434,9 @@ multi_server_reconnect(_) ->
     %% it should now be back on the first test server socket
     ?assertEqual(Srv1Pid, Srv3Pid),
 
-    receive Msg99 ->
-            ct:pal("got unexpected message: ~0p\n", [Msg99]),
-            throw(unexpected_message)
-    after 1000 -> ok
-    end,
+    %% there should be no pending messages
+    assertNoMessage(1000),
+
     ok.
 
 send_tcp_msg(BinHost, Port, BinMsg) ->

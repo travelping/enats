@@ -30,7 +30,10 @@
          unsub/3,
          disconnect/1,
          is_ready/1,
-         request/4
+         request/4,
+         server_info/1,
+         sockname/1,
+         peername/1
         ]).
 
 %% internal API
@@ -409,6 +412,15 @@ is_ready(Server) ->
 dump_subs(Server) ->
     gen_statem:call(Server, dump_subs).
 
+server_info(Server) ->
+    gen_statem:call(Server, server_info).
+
+sockname(Server) ->
+    gen_statem:call(Server, sockname).
+
+peername(Server) ->
+    gen_statem:call(Server, peername).
+
 -spec service(service(),  nonempty_list(#endpoint{}), module(), any()) -> #svc{}.
 service(SvcDesc, EndpDesc, Module, State) ->
     #svc{module = Module, state = State, service = SvcDesc, endpoints = EndpDesc}.
@@ -726,6 +738,55 @@ handle_event({call, From},
 
 handle_event({call, From}, dump_subs, _State, #{tid := Tid}) ->
     {keep_state_and_data, [{reply, From, ets:tab2list(Tid)}]};
+
+handle_event({call, From}, server_info, State, #{server_info := ServerInfo})
+  when State =:= connected; is_record(State, ready) ->
+    Reply = {ok, ServerInfo},
+    {keep_state_and_data, [{reply, From, Reply}]};
+handle_event({call, From}, server_info, _, _) ->
+    Reply = {error, closed},
+    {keep_state_and_data, [{reply, From, Reply}]};
+
+handle_event({call, From}, sockname, State, #{socket := Socket, tls := TLS})
+  when State =:= connected; is_record(State, ready) ->
+    Mod = case TLS of
+              false -> inet;
+              true  -> ssl
+          end,
+    Reply =
+        case Mod:sockname(Socket) of
+            {ok, {IP, Port}} when tuple_size(IP) =:= 4 ->
+                {ok, #{family => inet, addr => IP, port => Port}};
+            {ok, {IP, Port}} when tuple_size(IP) =:= 8 ->
+                {ok, #{family => inet6, addr => IP, port => Port}};
+            {error, _} = Error ->
+                Error
+        end,
+    {keep_state_and_data, [{reply, From, Reply}]};
+handle_event({call, From}, sockname, _, _) ->
+    Reply = {error, closed},
+    {keep_state_and_data, [{reply, From, Reply}]};
+
+handle_event({call, From}, peername, State, #{socket := Socket, tls := TLS})
+  when State =:= connected; is_record(State, ready) ->
+    Mod = case TLS of
+              false -> inet;
+              true  -> ssl
+          end,
+    Reply =
+        case Mod:peername(Socket) of
+            {ok, {IP, Port}} when tuple_size(IP) =:= 4 ->
+                {ok, #{family => inet, addr => IP, port => Port}};
+            {ok, {IP, Port}} when tuple_size(IP) =:= 8 ->
+                {ok, #{family => inet6, addr => IP, port => Port}};
+            {error, _} = Error ->
+                Error
+        end,
+    {keep_state_and_data, [{reply, From, Reply}]};
+handle_event({call, From}, peername, _, _) ->
+    Reply = {error, closed},
+    {keep_state_and_data, [{reply, From, Reply}]};
+
 
 handle_event(Event, EventContent, State, Data) ->
     ?LOG(debug, "NATS-#1:~nEvent: ~p~nContent: ~p~nState: ~p~nData: ~p",

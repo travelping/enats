@@ -71,7 +71,13 @@ connect_ok(_) ->
         {C, ready} -> ok
     after 1000 ->
             throw(ready_msg_not_sent)
-    end.
+    end,
+
+    ?assertMatch({ok, #{server_name := _}}, nats:server_info(C)),
+    ?assertMatch({ok, #{family := _}}, nats:peername(C)),
+    ?assertMatch({ok, #{family := _}}, nats:sockname(C)),
+
+    ok.
 
 connect_fail_no_host(_) ->
     %% connect returns a new connection process,

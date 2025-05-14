@@ -85,6 +85,7 @@
           buffer_size => 0,
           max_batch_size => ?DEFAULT_MAX_BATCH_SIZE,
           send_timeout => ?DEFAULT_SEND_TIMEOUT,
+          stop_on_error => false,
           default_explicit_host_preference => ?DEFAULT_EXPLICIT_HOST_PREFERENCE,
           default_explicit_host_order => ?DEFAULT_EXPLICIT_HOST_ORDER,
           default_implicit_host_preference => ?DEFAULT_IMPLICIT_HOST_PREFERENCE,
@@ -168,6 +169,7 @@
                      buffer_size    => -1 | non_neg_integer(),
                      max_batch_size => non_neg_integer(),
                      send_timeout   => non_neg_integer(),
+                     stop_on_error  => boolean(),
                      default_explicit_host_preference => 0..65535,
                      default_explicit_host_order => 0..65535,
                      default_implicit_host_preference => 0..65535,
@@ -204,6 +206,7 @@
                          buffer_size    := -1 | non_neg_integer(),
                          max_batch_size := non_neg_integer(),
                          send_timeout   := non_neg_integer(),
+                         stop_on_error  := boolean(),
                          default_server_opts := nats_server_opts(),
                          servers        := [nats_server()],
                          _              => _
@@ -242,6 +245,7 @@
                   buffer_size    := non_neg_integer(),
                   max_batch_size := non_neg_integer(),
                   send_timeout   := non_neg_integer(),
+                  stop_on_error  := boolean(),
                   default_server_opts := nats_server_opts(),
                   servers        := [nats_server()],
                   candidates     := [nats_server()],
@@ -488,7 +492,7 @@ handle_event(info, {{'DOWN', ?CONNECT_TAG}, _, process, Pid, Reason},
     ?LOG(debug, "NATS client failed to open TCP socket for connecting to ~s:~w unexpectedly with ~0p",
          [fmt_host(Host), Port, Reason]),
     notify_parent({error, Reason}, Data),
-    handle_socket_closed(Data#{socket := undefined}, []);
+    handle_socket_closed(Data#{socket := undefined});
 
 handle_event(info, {{'DOWN', ?CONNECT_TAG}, _, process, _, _} = Msg, _, _) ->
     ?LOG(debug, "Monitor Message: ~p", [Msg]),
@@ -500,15 +504,15 @@ handle_event(info, {?CONNECT_TAG, Pid, _, {error, _} = Error},
     ?LOG(debug, "NATS client failed to open TCP socket for connecting to ~s:~w with ~0p",
          [fmt_host(Host), Port, Error]),
     notify_parent(Error, Data),
-    handle_socket_closed(Data#{socket := undefined}, []);
+    handle_socket_closed(Data#{socket := undefined});
 
 handle_event(info, ?CONNECT_TAG, connecting, Data0) ->
     case select_connection_candidates(Data0) of
         {error, _} = Error ->
             notify_parent(Error, Data0),
             %% give up
-            handle_socket_closed(Data0#{server := undefined}, []);
-        {#{host := Host, port := Port} = Server, Data} ->
+            handle_socket_closed(Data0#{server := undefined});
+        {#{host := Host, port := Port}, Data} ->
             case get_host_addr(Host) of
                 {ok, IP} ->
                     Owner = self(),
@@ -516,7 +520,7 @@ handle_event(info, ?CONNECT_TAG, connecting, Data0) ->
                         proc_lib:spawn_opt(
                           fun() -> async_connect(Owner, IP, Port, Data) end,
                           [{monitor, [{tag, {'DOWN', ?CONNECT_TAG}}]}]),
-                    {keep_state, Data#{server := Server, socket := Pid}};
+                    {keep_state, Data#{socket := Pid}};
                 {error, _} = Error ->
                     ?LOG(debug, "NATS client failed to open TCP socket for connecting to ~s:~w with ~p",
                          [fmt_host(Host), Port, Error]),
@@ -567,9 +571,9 @@ handle_event(enter, _, State, _Data)
 
 handle_event(info, {tcp_error, Socket, Reason}, _, #{socket := Socket} = Data) ->
     log_connection_error(Reason, Data),
-    handle_socket_closed(close_socket(Data), []);
+    handle_socket_closed(close_socket(Data));
 handle_event(info, {tcp_closed, Socket}, _, #{socket := Socket} = Data) ->
-    handle_socket_closed(close_socket(Data), []);
+    handle_socket_closed(close_socket(Data));
 
 handle_event(info, {tcp, Socket, Bin}, State, #{socket := Socket} = Data)
   when State =:= connected; is_record(State, ready) ->
@@ -578,9 +582,9 @@ handle_event(info, {tcp, Socket, Bin}, State, #{socket := Socket} = Data)
 
 handle_event(info, {ssl_error, Socket, Reason}, _, #{socket := Socket} = Data) ->
     log_connection_error(Reason, Data),
-    handle_socket_closed(close_socket(Data), []);
+    handle_socket_closed(close_socket(Data));
 handle_event(info, {ssl_closed, Socket}, _, #{socket := Socket} = Data) ->
-    handle_socket_closed(close_socket(Data), []);
+    handle_socket_closed(close_socket(Data));
 
 handle_event(info, {ssl, Socket, Bin}, State, #{socket := Socket} = Data)
   when State =:= connected; is_record(State, ready) ->
@@ -816,9 +820,14 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %%% State Helper functions
 %%%===================================================================
 
-handle_socket_closed(Data, Actions) ->
+handle_socket_closed(#{stop_on_error := Stop} = Data) ->
     notify_parent(closed, Data),
-    {next_state, connecting, Data, Actions}.
+    case Stop of
+        true ->
+            {stop, normal, Data};
+        false ->
+            {next_state, connecting, Data}
+    end.
 
 service_sub_msg(SvcName, Op, Id, Subject, Data) ->
     service_sub_msg(SvcName, Op, Id, Subject, undefined, Data).
@@ -1528,7 +1537,7 @@ select_connection_candidates(#{candidates :=
         case Candidates of
             [Server] ->
                 %% last server in this order
-                {Server, NextOrderCandidates};
+                NextOrderCandidates;
             _ ->
                 PrefL0 = lists:map(
                            fun(#{preference := 0} = X) -> {0, X};
@@ -1536,7 +1545,7 @@ select_connection_candidates(#{candidates :=
                            end, Candidates),
                 PrefL = [N || {_,N} <- lists:sort(PrefL0)],
                 Server = select_by_preference(PrefL),
-                {Server, [{Order, lists:delete(Server, Candidates)}|NextOrderCandidates]}
+                [{Order, lists:delete(Server, Candidates)}|NextOrderCandidates]
         end,
     {Server, Data#{server := Server, candidates := NextCandidates}}.
 

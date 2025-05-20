@@ -30,6 +30,7 @@
 %% OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 -module(nats_kv_watch).
+-moduledoc false.
 
 -behaviour(gen_statem).
 

@@ -116,10 +116,19 @@
 %%% API
 %%%===================================================================
 
+-doc """
+Retrieves the configuration of a KeyValue store bucket.
+""".
+-spec get_bucket(Conn :: pid(), Bucket :: binary()) -> {ok, map()} | {error, term()}.
 get_bucket(Conn, Bucket)
   when is_binary(Bucket) ->
     get_bucket(Conn, Bucket, #{}).
 
+-doc """
+Retrieves the configuration of a KeyValue store bucket with additional options.
+""".
+-spec get_bucket(Conn :: pid(), Bucket :: binary(), Opts :: map()) ->
+          {ok, map()} | {error, term()}.
 get_bucket(Conn, Bucket, Opts)
   when is_binary(Bucket) ->
     nats_stream:get(Conn, ?BUCKET_NAME(Bucket), Opts).
@@ -131,16 +140,26 @@ configuration.
 If a KeyValue store with the same name already exists and the
 configuration is different, ErrBucketExists will be returned.
 """.
+-spec create_bucket(Conn :: pid(), Bucket :: binary()) -> {ok, map()} | {error, term()}.
 create_bucket(Conn, Bucket)
   when is_binary(Bucket) ->
     create_bucket(Conn, #{bucket => Bucket}, #{}).
 
--spec create_bucket(Conn :: pid(), Config :: config(), Opts :: map()) -> term().
+-doc """
+Creates a KeyValue store bucket with the specified configuration and options.
+""".
+-spec create_bucket(Conn :: pid(), Config :: config(), Opts :: map()) ->
+          {ok, map()} | {error, term()}.
 create_bucket(Conn, #{bucket := Bucket} = Config, Opts)
   when is_binary(Bucket) ->
     StreamCfg = prepare_key_value_config(Config),
     nats_stream:create(Conn, StreamCfg, Opts).
 
+-doc """
+Creates a KeyValue store bucket with the specified bucket name, configuration, and options.
+""".
+-spec create_bucket(Conn :: pid(), Bucket :: binary(), Config :: map(), Opts :: map()) ->
+          {ok, map()} | {error, term()}.
 create_bucket(Conn, Bucket, Config, Opts)
   when is_binary(Bucket), is_map(Config), is_map(Opts) ->
     create_bucket(Conn, Config#{bucket => Bucket}, Opts).
@@ -152,16 +171,25 @@ configuration.
 If a KeyValue store with the given name does not exist, ErrBucketNotFound
 will be returned.
 """.
+-spec update_bucket(Conn :: pid(), Bucket :: binary()) -> {ok, map()} | {error, term()}.
 update_bucket(Conn, Bucket)
   when is_binary(Bucket) ->
     update_bucket(Conn, #{bucket => Bucket}, #{}).
 
+-doc """
+Updates an existing KeyValue store bucket with the specified configuration and options.
+""".
 -spec update_bucket(Conn :: pid(), Config :: config(), Opts :: map()) -> term().
 update_bucket(Conn, #{bucket := Bucket} = Config, Opts)
   when is_binary(Bucket) ->
     StreamCfg = prepare_key_value_config(Config),
     nats_stream:update(Conn, StreamCfg, Opts).
 
+-doc """
+Updates an existing KeyValue store bucket with the specified bucket name, configuration, and options.
+""".
+-spec update_bucket(Conn :: pid(), Bucket :: binary(), Config :: map(), Opts :: map()) ->
+          {ok, map()} | {error, term()}.
 update_bucket(Conn, Bucket, Config, Opts)
   when is_binary(Bucket), is_map(Config), is_map(Opts) ->
     update_bucket(Conn, Config#{bucket => Bucket}, Opts).
@@ -172,11 +200,16 @@ DeleteKeyValue will delete this KeyValue store.
 If the KeyValue store with given name does not exist,
 ErrBucketNotFound will be returned.
 """.
+-spec delete_bucket(Conn :: pid(), Bucket :: binary()) -> {ok, map()} | {error, term()}.
 delete_bucket(Conn, Bucket)
   when is_binary(Bucket) ->
     delete_bucket(Conn, Bucket, #{}).
 
-
+-doc """
+Deletes a KeyValue store bucket with the specified options.
+""".
+-spec delete_bucket(Conn :: pid(), Bucket :: binary(), Opts :: map()) ->
+          {ok, map()} | {error, term()}.
 delete_bucket(Conn, Bucket, Opts)
   when is_binary(Bucket), is_map(Opts) ->
     nats_stream:delete(Conn, ?BUCKET_NAME(Bucket), Opts).
@@ -199,10 +232,15 @@ data, not the entry value.
 - ResumeFromRevision instructs the key watcher to resume from a
 specific revision number.
 """.
+-spec watch(Conn :: pid(), Bucket :: binary(), Keys :: binary() | [binary()], WatchOpts :: map(), Opts :: map()) -> {ok, pid()} | {error, term()}.
 watch(Conn, Bucket, Keys, WatchOpts, Opts)
   when is_binary(Bucket), is_map(WatchOpts), is_map(Opts) ->
     watch(Conn, Bucket, Keys, WatchOpts, Opts, [{spawn_opt, [link]}]).
 
+-doc """
+Watch for any updates to keys with additional start options for the watcher process.
+""".
+-spec watch(Conn :: pid(), Bucket :: binary(), Keys :: binary() | [binary()], WatchOpts :: map(), Opts :: map(), StartOpts :: [term()]) -> {ok, pid()} | {error, term()}.
 watch(Conn, Bucket, Keys, WatchOpts, Opts, StartOpts)
   when is_binary(Bucket), is_map(WatchOpts), is_map(Opts) ->
     nats_kv_watch:start(Conn, Bucket, Keys, WatchOpts, Opts, StartOpts).
@@ -210,10 +248,15 @@ watch(Conn, Bucket, Keys, WatchOpts, Opts, StartOpts)
 -doc """
 WatchAll will invoke the callback for all updates.
 """.
+-spec watch_all(Conn :: pid(), Bucket :: binary(), WatchOpts :: map(), Opts :: map()) -> {ok, pid()} | {error, term()}.
 watch_all(Conn, Bucket, WatchOpts, Opts)
   when is_binary(Bucket), is_map(WatchOpts), is_map(Opts) ->
     watch(Conn, Bucket, ~">", WatchOpts, Opts, [{spawn_opt, [link]}]).
 
+-doc """
+Watch for all updates with additional start options for the watcher process.
+""".
+-spec watch_all(Conn :: pid(), Bucket :: binary(), WatchOpts :: map(), Opts :: map(), StartOpts :: [term()]) -> {ok, pid()} | {error, term()}.
 watch_all(Conn, Bucket, WatchOpts, Opts, StartOpts)
   when is_binary(Bucket), is_map(WatchOpts), is_map(Opts) ->
     nats_kv_watch:start(Conn, Bucket, ~">", WatchOpts, Opts, StartOpts).
@@ -222,9 +265,14 @@ watch_all(Conn, Bucket, WatchOpts, Opts, StartOpts)
 SekectKeys will return KeyLister, allowing to retrieve selected keys from
 the key value store in a streaming fashion (on a channel).
 """.
+-spec select_keys(Conn :: pid(), Bucket :: binary(), Keys :: binary() | [binary()], WatchOpts :: map()) -> {ok, list()} | {error, term()}.
 select_keys(Conn, Bucket, Keys, WatchOpts) ->
     select_keys(Conn, Bucket, Keys, WatchOpts, #{}).
 
+-doc """
+Selects keys from the key value store with additional options.
+""".
+-spec select_keys(Conn :: pid(), Bucket :: binary(), Keys :: binary() | [binary()], WatchOpts :: map(), Opts :: map()) -> {ok, list()} | {error, term()}.
 select_keys(Conn, Bucket, Keys, WatchOpts0, Opts) ->
     WatchOpts = WatchOpts0#{ignore_deletes => true,
                             cb => fun select_keys_watch_cb/3},
@@ -255,9 +303,14 @@ select_keys_loop(Pid, Acc) ->
 ListKeys will return KeyLister, allowing to retrieve all keys from
 the key value store in a streaming fashion (on a channel).
 """.
+-spec list_keys(Conn :: pid(), Bucket :: binary(), WatchOpts :: map()) -> {ok, list()} | {error, term()}.
 list_keys(Conn, Bucket, WatchOpts) ->
     list_keys(Conn, Bucket, WatchOpts, #{}).
 
+-doc """
+Lists all keys from the key value store with additional options.
+""".
+-spec list_keys(Conn :: pid(), Bucket :: binary(), WatchOpts :: map(), Opts :: map()) -> {ok, list()} | {error, term()}.
 list_keys(Conn, Bucket, WatchOpts, Opts) ->
     select_keys(Conn, Bucket, ~">", WatchOpts, Opts).
 
@@ -265,10 +318,19 @@ list_keys(Conn, Bucket, WatchOpts, Opts) ->
 Get returns the latest value for the key. If the key does not exist,
 ErrKeyNotFound will be returned.
 """.
+-spec get(Conn :: pid(), Bucket :: binary(), Key :: binary()) -> {ok, binary()} | {deleted, map()} | {error, term()}.
 get(Conn, Bucket, Key)
   when is_binary(Bucket), is_binary(Key) ->
     get(Conn, Bucket, Key, last, #{}).
 
+-doc """
+Gets a specific revision of a key by sequence number or
+the latest value for a key with additional options.
+""".
+-spec get(Conn :: pid(), Bucket :: binary(), Key :: binary(), SeqNo :: integer() | last) ->
+          {ok, binary()} | {deleted, map()} | {error, term()};
+         (Conn :: pid(), Bucket :: binary(), Key :: binary(), Opts :: map()) ->
+          {ok, binary()} | {deleted, map()} | {error, term()}.
 get(Conn, Bucket, Key, SeqNo)
   when SeqNo =:= last; is_integer(SeqNo) ->
     get(Conn, Bucket, Key, SeqNo, #{});
@@ -276,6 +338,13 @@ get(Conn, Bucket, Key, Opts)
   when is_binary(Bucket), is_binary(Key), is_map(Opts) ->
     get(Conn, Bucket, Key, last, Opts).
 
+-doc """
+Gets a specific revision of a key by sequence number with additional options.
+""".
+-spec get(Conn :: pid(), Bucket :: binary(), Key :: binary(), SeqNo :: integer() | 'last', Opts :: map()) ->
+          {'ok', map()} |
+          {'deleted', #{'message':=#{'hdrs':=maybe_improper_list(), _=>_}, _=>_}} |
+          {'error', term()}.
 get(Conn, Bucket, Key, SeqNo, Opts) ->
     case get_msg(Conn, Bucket, Key, SeqNo, Opts) of
         {ok, #{message := #{hdrs := Headers}} = Response} ->
@@ -289,6 +358,12 @@ get(Conn, Bucket, Key, SeqNo, Opts) ->
             Response
     end.
 
+-doc """
+Retrieves the raw message for a key at a specific sequence number or the last message.
+This function is typically used internally by `get/5`.
+""".
+-spec get_msg(Conn :: pid(), Bucket :: binary(), Key :: binary(), SeqNo :: integer() | last, Opts :: map()) ->
+          {ok, map()} | {error, term()}.
 get_msg(Conn, Bucket, Key, last, Opts) ->
     get_last_msg_for_subject(Conn, Bucket, Key, Opts);
 get_msg(Conn, Bucket, Key, SeqNo, Opts)
@@ -334,6 +409,7 @@ be updated.
 A key has to consist of alphanumeric characters, dashes, underscores,
 equal signs, and dots.
 """.
+-spec put(Conn :: pid(), Bucket :: binary(), Key :: binary(), Value :: binary()) -> {ok, map()} | {error, term()}.
 put(Conn, Bucket, Key, Value)
   when is_binary(Bucket), is_binary(Key) ->
     case nats:request(Conn, ?SUBJECT_NAME(Bucket, Key), Value, #{}) of
@@ -350,9 +426,14 @@ already exists, ErrKeyExists will be returned.
 A key has to consist of alphanumeric characters, dashes, underscores,
 equal signs, and dots.
 """.
+-spec create(Conn :: pid(), Bucket :: binary(), Key :: binary(), Value :: binary()) -> {ok, map()} | {error, term()}.
 create(Conn, Bucket, Key, Value) ->
     create(Conn, Bucket, Key, Value, #{}).
 
+-doc """
+Creates a key/value pair with additional options.
+""".
+-spec create(Conn :: pid(), Bucket :: binary(), Key :: binary(), Value :: binary(), Opts :: map()) -> {ok, map()} | {error, term()}.
 create(Conn, Bucket, Key, Value, Opts) ->
     create_do(Conn, Bucket, Key, Value, maps:merge(#{retry => true}, Opts)).
 
@@ -385,6 +466,8 @@ create_do(Conn, Bucket, Key, Value, #{retry := Retry} = Opts)
 Update will update the value if the latest revision matches.
 If the provided revision is not the latest, Update will return an error.
 """.
+-spec update(Conn :: pid(), Bucket :: binary(), Key :: binary(), Value :: binary(), SeqNo :: integer()) ->
+          {ok, map()} | {error, term()}.
 update(Conn, Bucket, Key, Value, SeqNo)
   when is_binary(Bucket), is_binary(Key) ->
     Header =
@@ -392,8 +475,8 @@ update(Conn, Bucket, Key, Value, SeqNo)
     case nats:request(Conn, ?SUBJECT_NAME(Bucket, Key), Value, #{header => Header}) of
         {ok, Response} ->
             unmarshal_response(Response);
-        Other ->
-            Other
+        {error, _} = Error ->
+            Error
     end.
 
 -doc """
@@ -405,9 +488,14 @@ will not remove any previous revisions from the underlying stream.
 `LastRevision` option can be specified to only perform delete if the
 latest revision the provided one.
 """.
+-spec delete(Conn :: pid(), Bucket :: binary(), Key :: binary()) -> {ok, map()} | {error, term()}.
 delete(Conn, Bucket, Key) ->
     delete(Conn, Bucket, Key, #{}).
 
+-doc """
+Deletes a key with additional options.
+""".
+-spec delete(Conn :: pid(), Bucket :: binary(), Key :: binary(), Opts :: map()) -> {ok, map()} | {error, term()}.
 delete(Conn, Bucket, Key, Opts)
   when is_binary(Bucket), is_binary(Key), is_map(Opts) ->
     Headers0 =
@@ -428,8 +516,8 @@ delete(Conn, Bucket, Key, Opts)
     case nats:request(Conn, ?SUBJECT_NAME(Bucket, Key), <<>>, #{header => Header}) of
         {ok, Response} ->
             unmarshal_response(Response);
-        Other ->
-            Other
+        {error, _} = Error ->
+            Error
     end.
 
 -doc """
@@ -441,9 +529,14 @@ previous revisions from the underlying streams.
 `LastRevision` option can be specified to only perform purge if the
 latest revision the provided one.
 """.
+-spec purge(Conn :: pid(), Bucket :: binary(), Key :: binary()) -> {ok, map()} | {error, term()}.
 purge(Conn, Bucket, Key) ->
     purge(Conn, Bucket, Key, #{}).
 
+-doc """
+Purges a key with additional options.
+""".
+-spec purge(Conn :: pid(), Bucket :: binary(), Key :: binary(), Opts :: map()) -> {ok, map()} | {error, term()}.
 purge(Conn, Bucket, Key, Opts) ->
     delete(Conn, Bucket, Key, Opts#{purge => true}).
 

@@ -301,8 +301,8 @@ get_last_msg_for_subject(Conn, Bucket, Key, #{allow_direct := true} = Opts) ->
     case nats:request(Conn, Topic, <<>>, #{}) of
         {ok, Response} ->
             direct_msg_response(Response);
-        Other ->
-            Other
+        {error, _} = Error ->
+            Error
     end;
 get_last_msg_for_subject(Conn, Bucket, Key, Opts) ->
     get_msg(Conn, Bucket, #{last_by_subj => Key}, Opts).
@@ -313,8 +313,8 @@ get_msg(Conn, Bucket, Req, #{allow_direct := true} = Opts) ->
     case nats:request(Conn, Topic, JSON, Opts) of
         {ok, Response} ->
             direct_msg_response(Response);
-        Other ->
-            Other
+        {error, _} = Error ->
+            Error
     end;
 get_msg(Conn, Bucket, Req, Opts) ->
     Name = ?BUCKET_NAME(Bucket),
@@ -513,9 +513,6 @@ unmarshal_response({Response, _Opts}) ->
         C:E:St ->
             {error, {C, E, St}}
     end.
-
-direct_msg_response({#{error := Error}, _}) ->
-    {error, Error};
 
 direct_msg_response({_Content,
                      #{header := <<"NATS/1.0 ", Code:3/bytes, " ", Rest/binary>>}}) ->

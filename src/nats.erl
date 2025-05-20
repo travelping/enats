@@ -120,15 +120,15 @@
                               port      => non_neg_integer() | undefined}.
 
 -type nats_server_opts() :: #{scheme     := binary(),
-                              preference   := 0..65535,
-                              host_order := 0..65535,
+                              preference := 0..65535,
+                              order      := 0..65535,
                               explicit   := boolean()}.
 
 -type nats_server() :: #{scheme     := binary(),
                          host       := nats_host(),
                          port       := non_neg_integer() | undefined,
-                         preference   := 0..65535,
-                         host_order := 0..65535,
+                         preference := 0..65535,
+                         host       := 0..65535,
                          explicit   := boolean()}.
 
 -type v0_opts() :: #{socket_opts    => socket_opts(),
@@ -141,6 +141,8 @@
                      auth_token     => binary(),
                      user           => binary(),
                      pass           => binary(),
+                     nkey_seed      => binary(),
+                     jwt            => binary(),
                      name           => binary(),
                      lang           => binary(),
                      version        => binary(),
@@ -208,6 +210,10 @@
                          send_timeout   := non_neg_integer(),
                          stop_on_error  := boolean(),
                          default_server_opts := nats_server_opts(),
+                         default_explicit_host_preference := 0..65535,
+                         default_explicit_host_order      := 0..65535,
+                         default_implicit_host_preference := 0..65535,
+                         default_implicit_host_order      := 0..65535,
                          servers        := [nats_server()],
                          _              => _
                         }.

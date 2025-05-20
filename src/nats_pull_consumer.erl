@@ -94,7 +94,7 @@ init([Module, Conn, Stream, Name, NatsOpts]) ->
         Inbox = <<"_INBOX.", (nats:rnd_topic_id())/binary, $., (nats:rnd_topic_id())/binary>>,
         {ok, Sid} ?= nats:sub(Conn, Inbox),
 
-        nats_consumer:msg_next(Conn, Stream, Name, Inbox, #{batch => BatchSize}, NatsOpts),
+        ok ?= nats_consumer:msg_next(Conn, Stream, Name, Inbox, #{batch => BatchSize}, NatsOpts),
 
         State = #state{
                    module = Module,
@@ -135,8 +135,8 @@ handle_info({Conn, Sid, {msg, Subject, Message, Opts}},
         case State of
             #state{stream = Stream, name = Name, inbox = Inbox, nats_opts = NatsOpts,
                    batch_size = BatchSize, batch_outstanding = 1} ->
-                nats_consumer:msg_next(
-                  Conn, Stream, Name, Inbox, #{batch => BatchSize}, NatsOpts),
+                ok = nats_consumer:msg_next(
+                       Conn, Stream, Name, Inbox, #{batch => BatchSize}, NatsOpts),
                 BatchSize;
             #state{batch_outstanding = Outstanding} ->
                 Outstanding

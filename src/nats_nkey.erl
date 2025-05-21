@@ -15,6 +15,7 @@
 %% module contains only the minimum functions required for nkeys
 
 -module(nats_nkey).
+-moduledoc false.
 
 -export([decode_base32/1, encode_base32/1]).
 -export([from_seed/1, public/1, sign/2]).

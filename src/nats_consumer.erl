@@ -168,7 +168,7 @@ subscribe(_Conn, #{stream_name := _, name := _}, _Opts) ->
 
 subscribe(Conn, Stream, Name, _Opts) ->
     maybe
-        #{type := ?JS_API_V1_CONSUMER_INFO_RESPONSE} = Config ?= get(Conn, Stream, Name),
+        {ok, #{type := ?JS_API_V1_CONSUMER_INFO_RESPONSE} = Config} ?= get(Conn, Stream, Name),
         case Config of
             #{config := #{deliver_subject := DeliverSubject}} ->
                 nats:sub(Conn, DeliverSubject);
@@ -185,7 +185,7 @@ unsubscribe(_Conn, #{stream_name := _, name := _}, _Opts) ->
 
 unsubscribe(Conn, Stream, Name, _Opts) ->
     maybe
-        #{type := ?JS_API_V1_CONSUMER_INFO_RESPONSE} = Config ?= get(Conn, Stream, Name),
+        {ok, #{type := ?JS_API_V1_CONSUMER_INFO_RESPONSE} = Config} ?= get(Conn, Stream, Name),
         case Config of
             #{config := #{deliver_subject := DeliverSubject}} ->
                 nats:unsub(Conn, DeliverSubject);
@@ -198,12 +198,13 @@ ack_msg(_Conn, _AckType, _Sync, #{acked := true} = Opts) ->
     Opts;
 ack_msg(Conn, AckType, Sync, #{reply_to := ReplyTo} = Opts) ->
     Ack = ack(AckType),
-    case Sync of
-        true ->
-            nats:request(Conn, ReplyTo, Ack, #{});
-        false ->
-            nats:pub(Conn, ReplyTo, Ack, #{})
-    end,
+    %% TBD: swallowing the result of the ACK might be wrong, check with Golang NATS client
+    _ = case Sync of
+            true ->
+                nats:request(Conn, ReplyTo, Ack, #{});
+            false ->
+                nats:pub(Conn, ReplyTo, Ack, #{})
+        end,
     case AckType of
         _ when AckType =:= ack; AckType =:= next; AckType =:= term ->
             Opts#{acked => true};

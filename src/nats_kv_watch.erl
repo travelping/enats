@@ -30,6 +30,7 @@
 %% OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 -module(nats_kv_watch).
+-moduledoc false.
 
 -behaviour(gen_statem).
 
@@ -172,8 +173,8 @@ handle_event(info, {Conn, Sid, Msg0}, State, #data{conn = Conn, sid = Sid} = Dat
 terminate(_Reason, _State,
           #data{conn = Conn,
                 watch = #{config := #{deliver_subject := DeliverSubject}} = Watch}) ->
-    nats:unsub(Conn, DeliverSubject),
-    nats_consumer:delete(Conn, Watch),
+    _ = nats:unsub(Conn, DeliverSubject),
+    _ = nats_consumer:delete(Conn, Watch),
     ok.
 
 code_change(_OldVsn, State, Data, _Extra) ->
@@ -182,7 +183,7 @@ code_change(_OldVsn, State, Data, _Extra) ->
 handle_message({msg, _, _, #{status := 100, reply_to := ReplyTo}} = _Msg,
                _State, #data{conn = Conn}) ->
     %% FlowControl Request
-    nats:pub(Conn, ReplyTo),
+    _ = nats:pub(Conn, ReplyTo),
     keep_state_and_data;
 handle_message({msg, _, <<>>,
                 #{status := 100, description := <<"Idle", _/binary>>,

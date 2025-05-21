@@ -372,7 +372,7 @@ create_do(Conn, Bucket, Key, Value, #{retry := Retry} = Opts)
                     %% race between us and stream purge on the message, retry
                     create_do(Conn, Bucket, Key, Value, Opts#{retry := false});
                 Other ->
-                    ?LOG(error, "key '~0p' already exists: ~0p", [Key, Other]),
+                    ?LOG(debug, "key '~0p' already exists: ~0p", [Key, Other]),
                     {error, exists}
             end;
         {error, _} = Error ->

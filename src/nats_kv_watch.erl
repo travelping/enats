@@ -189,19 +189,19 @@ handle_message({msg, _, <<>>,
                   header := _Header} = Opts} = _Msg,
                _State, #data{conn = _Conn})
   when not is_map_key(reply_to, Opts) ->
-    ?LOG(critical, "HeartBeat Message: ~0p", [_Msg]),
+    ?LOG(debug, "HeartBeat Message: ~0p", [_Msg]),
     keep_state_and_data;
 handle_message({msg, _, <<>>,
                 #{status := 100, description := <<"Flow", _/binary>>,
                   header := _Header} = Opts} = _Msg,
                _State, #data{conn = _Conn})
   when not is_map_key(reply_to, Opts) ->
-    ?LOG(critical, "Flow control Message: ~0p", [_Msg]),
+    ?LOG(debug, "Flow control Message: ~0p", [_Msg]),
     keep_state_and_data;
 handle_message({msg, _, <<>>, #{status := 100, header := _Header} = Opts} = _Msg,
                _State, _Data)
   when not is_map_key(reply_to, Opts) ->
-    ?LOG(critical, "unexpected control Message: ~0p", [_Msg]),
+    ?LOG(error, "unexpected control Message: ~0p", [_Msg]),
     keep_state_and_data;
 
 handle_message({msg, _, _, MsgOpts} = Msg,

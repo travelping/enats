@@ -117,17 +117,17 @@ init([Module, Conn, Stream, Name, NatsOpts]) ->
     end.
 
 handle_call(_Request, _From, State) ->
-    ?LOG(info, "~s: call ~0p", [?MODULE, _Request]),
+    ?LOG(error, "~s: unexpected call ~0p", [?MODULE, _Request]),
     Reply = ok,
     {reply, Reply, State}.
 
 handle_cast(_Request, State) ->
-    ?LOG(info, "~s: cast ~0p", [?MODULE, _Request]),
+    ?LOG(error, "~s: unexpected cast ~0p", [?MODULE, _Request]),
     {noreply, State}.
 
 handle_info({Conn, Sid, {msg, Subject, Message, Opts}},
             #state{module = Module, modstate = ModStateIn, conn = Conn, sid = Sid} = State) ->
-    ?LOG(info, "~s: Subject: ~0p, Message: ~0p", [Subject, Message]),
+    ?LOG(debug, "~s: Subject: ~0p, Message: ~0p", [Subject, Message]),
     {AckType, ModStateOut} = Module:handle_message(Subject, Message, Opts, ModStateIn),
     nats_consumer:ack_msg(Conn, AckType, false, Opts),
 
@@ -144,7 +144,7 @@ handle_info({Conn, Sid, {msg, Subject, Message, Opts}},
     {noreply, State#state{modstate = ModStateOut, batch_outstanding = BatchOutstanding}};
 
 handle_info(_Info, State) ->
-    ?LOG(info, "~s: info ~0p, state: ~p0", [?MODULE, _Info, State]),
+    ?LOG(error, "~s: unexpected info ~0p, state: ~p0", [?MODULE, _Info, State]),
     {noreply, State}.
 
 terminate(_Reason, _State) ->

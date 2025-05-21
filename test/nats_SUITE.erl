@@ -289,7 +289,7 @@ multi_server_reconnect_server(Owner) ->
     {ok, S1} = nats_fake_server:start_link(),
     {ok, S2} = nats_fake_server:start_link(),
 
-    Server = #{scheme => ~"nats", host => ~"localhost"},
+    Server = #{scheme => ~"nats", host => ~"localhost", family => inet},
     Server1 = Server#{port => nats_fake_server:port(S1)},
     Server2 = Server#{port => nats_fake_server:port(S2)},
     Owner ! {ready, self(), [Server1, Server2]},

@@ -116,10 +116,12 @@
 %% -type nats_host() :: inet:socket_address().
 
 -type nats_server_info() :: #{scheme    => binary(),
+                              family    => 'undefined' | 'inet' | 'inet6',
                               host      => nats_host(),
                               port      => non_neg_integer() | undefined}.
 
 -type nats_server_opts() :: #{scheme     := binary(),
+                              family     := 'undefined' | 'inet' | 'inet6',
                               preference := 0..65535,
                               order      := 0..65535,
                               explicit   := boolean()}.
@@ -127,6 +129,7 @@
 -type nats_server() :: #{scheme     := binary(),
                          host       := nats_host(),
                          port       := non_neg_integer() | undefined,
+                         family     := 'undefined' | 'inet' | 'inet6',
                          preference := 0..65535,
                          host       := 0..65535,
                          explicit   := boolean()}.
@@ -629,8 +632,8 @@ handle_event(info, ?CONNECT_TAG, connecting, Data0) ->
             notify_parent(Error, Data0),
             %% give up
             handle_socket_closed(Data0#{server := undefined});
-        {#{host := Host, port := Port}, Data} ->
-            case get_host_addr(Host) of
+        {#{host := Host, port := Port, family := Family}, Data} ->
+            case get_host_addr(Family, Host) of
                 {ok, IP} ->
                     Owner = self(),
                     {Pid, _} =
@@ -1599,7 +1602,8 @@ finalize_server_opts(#{default_implicit_host_preference := Pref,
         #{scheme => Scheme,
           preference => Pref,
           order => Order,
-          explicit => false},
+          explicit => false,
+          family => undefined},
     _Opts = Opts0#{default_server_opts => ServerOpts}.
 
 normalize_server(#{port := _} = Server) ->
@@ -1609,7 +1613,7 @@ normalize_server(Server) ->
 
 init_explicit_host(#{scheme := _, host := _} = Server,
                    #{default_explicit_host_preference := Pref, default_explicit_host_order := Order}) ->
-    maps:merge(#{preference => Pref, order => Order},
+    maps:merge(#{preference => Pref, order => Order, family => undefined},
                normalize_server(Server#{explicit => true})).
 
 init_host_scheme(Host, Port, #{tls_first := true}) ->
@@ -1712,20 +1716,28 @@ fmt_host(IP)
 fmt_host(Host) when is_list(Host); is_binary(Host) ->
     Host.
 
-get_host_addr({_, _, _, _} = IP) ->
+get_host_addr(_, {_, _, _, _} = IP) ->
     {ok, IP};
-get_host_addr({_, _, _, _, _, _, _, _} = IP) ->
+get_host_addr(_, {_, _, _, _, _, _, _, _} = IP) ->
     {ok, IP};
-get_host_addr(Bin) when is_binary(Bin) ->
-    get_host_addr(binary_to_list(Bin));
-get_host_addr(Host) when is_list(Host); is_atom(Host) ->
-    maybe
-        {error, _} ?= inet:getaddrs(Host, inet6),
-        {error, _} ?= inet:getaddrs(Host, inet)
-    else
+get_host_addr(Family, Bin) when is_binary(Bin) ->
+    get_host_addr(Family, binary_to_list(Bin));
+get_host_addr(Family, Host) when is_list(Host); is_atom(Host) ->
+    get_host_addr([inet6, inet], Family, Host).
+
+get_host_addr([], _Family, _Host) ->
+    {error, nxdomain};
+get_host_addr([WantFamily|More], Family, Host)
+  when Family =:= undefined;
+       Family =:= WantFamily ->
+    case inet:getaddrs(Host, WantFamily) of
         {ok, IPs} ->
-            {ok, lists:nth(rand:uniform(length(IPs)), IPs)}
-    end.
+            {ok, lists:nth(rand:uniform(length(IPs)), IPs)};
+        {error, _} ->
+            get_host_addr(More, Family, Host)
+    end;
+get_host_addr([_|More], Family, Host) ->
+    get_host_addr(More, Family, Host).
 
 json_object_push(Key, Value, Acc) ->
     K = try binary_to_existing_atom(Key) catch _:_ -> Key end,

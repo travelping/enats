@@ -33,7 +33,8 @@
          request/4,
          server_info/1,
          sockname/1,
-         peername/1
+         peername/1,
+         is_alive/1
         ]).
 
 %% internal API
@@ -558,6 +559,13 @@ rnd_topic_id() ->
 -spec monitor(Server :: conn()) -> reference().
 monitor(Server) ->
     monitor(process, Server).
+
+-doc """
+Return true is the connection process is alive
+""".
+-spec is_alive(Server :: conn()) -> boolean().
+is_alive(Server) ->
+    is_process_alive(Server).
 
 %%%===================================================================
 %%% gen_statem callbacks

@@ -250,13 +250,13 @@ purge(Conn, Name)
     purge(Conn, Name, #{}).
 
 purge(Conn, Name, Opts0)
-  when is_binary(Name), is_map(Opts0) ->
+  when is_map(Opts0) ->
     Msg = maps:with([filter, seq, keep], Opts0),
     Opts = maps:without([filter, seq, keep], Opts0),
     purge(Conn, Name, Msg, Opts).
 
 purge(Conn, Name, Msg, Opts)
-  when is_binary(Name), is_map(Msg), is_map(Opts) ->
+  when is_map(Msg), is_map(Opts) ->
     Topic = make_js_api_topic(~"PURGE", Name, Opts),
     case nats:request(Conn, Topic, json_encode(Msg), #{}) of
         {ok, Response} ->
@@ -343,14 +343,14 @@ msg_delete(Conn, Name, SeqNo, NoErase, Opts) ->
 %%%===================================================================
 
 make_js_api_topic(Op, #{domain := Domain}) ->
-    <<"$JS.", Domain/binary, ".API.STREAM.", Op/binary>>;
+    [~"$JS.", Domain, ~".API.STREAM.", Op];
 make_js_api_topic(Op, _) ->
-    <<"$JS.API.STREAM.", Op/binary>>.
+    [~"$JS.API.STREAM.", Op].
 
 make_js_api_topic(Op, Stream, #{domain := Domain}) ->
-    <<"$JS.", Domain/binary, ".API.STREAM.", Op/binary, $., Stream/binary>>;
+    [~"$JS.", Domain, ~".API.STREAM.", Op, $., Stream];
 make_js_api_topic(Op, Stream, _) ->
-    <<"$JS.API.STREAM.", Op/binary, $., Stream/binary>>.
+    [~"$JS.API.STREAM.", Op, $., Stream].
 
 to_atom(Bin) when is_binary(Bin) ->
     try binary_to_existing_atom(Bin) catch _:_ -> Bin end.

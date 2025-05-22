@@ -59,30 +59,40 @@ types(v1) ->
      ?JS_API_V1_CONSUMER_NAMES_RESPONSE,
      ?JS_API_V1_CONSUMER_PAUSE_RESPONSE].
 
-create(Conn, Stream)
-  when is_binary(Stream) ->
+-spec create(Conn :: nats:conn(), Stream :: iodata()) -> {ok, map()} | {error, any()}.
+create(Conn, Stream) ->
     create(Conn, Stream, #{}, #{}).
 
-create(Conn, Stream, Name)
-  when is_binary(Stream), is_binary(Name) ->
-    create(Conn, Stream, Name, #{});
-
+-spec create(Conn :: nats:conn(), Stream :: iodata(), Opts :: map()) ->
+          {ok, map()} | {error, any()};
+            (Conn :: nats:conn(), Stream :: iodata(), Name :: iodata()) ->
+          {ok, map()} | {error, any()}.
 create(Conn, Stream, Opts)
-  when is_binary(Stream), is_map(Opts) ->
-    create(Conn, Stream, maps:without(?API_OPTS, Opts), maps:with(?API_OPTS, Opts)).
+  when is_map(Opts) ->
+    create(Conn, Stream, maps:without(?API_OPTS, Opts), maps:with(?API_OPTS, Opts));
+
+create(Conn, Stream, Name) ->
+    create(Conn, Stream, Name, #{}).
+
+-spec create(Conn :: nats:conn(), Stream :: iodata(), Config :: map(), Opts :: map()) ->
+          {ok, map()} | {error, any()};
+            (Conn :: nats:conn(), Stream :: iodata(), Name :: iodata(), Opts :: map()) ->
+          {ok, map()} | {error, any()}.
+create(Conn, Stream, Config, Opts)
+  when is_map(Config), is_map(Opts) ->
+    create_req(Conn, Stream, Config#{stream_name => to_bin(Stream)}, Opts);
 
 create(Conn, Stream, Name, Opts)
-  when is_binary(Stream), is_binary(Name), is_map(Opts) ->
-    create(Conn, Stream, Name, maps:without(?API_OPTS, Opts), maps:with(?API_OPTS, Opts));
+  when is_map(Opts) ->
+    create(Conn, Stream, Name, maps:without(?API_OPTS, Opts), maps:with(?API_OPTS, Opts)).
 
-create(Conn, Stream, Config, Opts)
-  when is_binary(Stream), is_map(Config), is_map(Opts) ->
-    create_req(Conn, Stream, Config#{stream_name => Stream}, Opts).
-
+-spec create(Conn :: nats:conn(), Stream :: iodata(), Name :: iodata(),
+             Config :: map(), Opts :: map()) -> {ok, map()} | {error, any()}.
 create(Conn, Stream, Name, Config, Opts)
-  when is_binary(Stream), is_binary(Name), is_map(Config), is_map(Opts) ->
-    ConsumerId = <<Stream/binary, $., Name/binary>>,
-    create_req(Conn, ConsumerId, Config#{stream_name => Stream, name => Name}, Opts).
+  when is_map(Config), is_map(Opts) ->
+    ConsumerId = [Stream, $., Name],
+    create_req(
+      Conn, ConsumerId, Config#{stream_name => to_bin(Stream), name => to_bin(Name)}, Opts).
 
 create_req(Conn, ConsumerId, Config, Opts) ->
     Topic = make_js_api_create_topic(ConsumerId, Opts),
@@ -93,41 +103,53 @@ create_req(Conn, ConsumerId, Config, Opts) ->
             Other
     end.
 
+-spec get(Conn :: nats:conn(), #{name := iodata(), stream_name := iodata(), _=>_}) ->
+          {ok, map()} | {error, any()}.
 get(Conn, #{stream_name := Stream, name := Name}) ->
     get(Conn, Stream, Name, #{}).
 
+-spec get(Conn :: nats:conn(),
+          #{name := iodata(), stream_name := iodata(), _=>_}, Opts :: map()) ->
+          {ok, map()} | {error, any()};
+         (Conn :: nats:conn(), Stream :: iodata(), Name :: iodata()) ->
+          {ok, map()} | {error, any()}.
 get(Conn, #{stream_name := Stream, name := Name}, Opts)
   when is_map(Opts) ->
     get(Conn, Stream, Name, #{});
-
-get(Conn, Stream, Name)
-  when is_binary(Stream), is_binary(Name) ->
+get(Conn, Stream, Name) ->
     get(Conn, Stream, Name, #{}).
 
-get(Conn, Stream, Name, Opts)
-  when is_binary(Stream), is_binary(Name) ->
-    Topic = make_js_api_topic(~"INFO", <<Stream/binary, $., Name/binary>>, Opts),
+-spec get(Conn :: nats:conn(), Stream :: iodata(), Name :: iodata(), Opts :: map()) ->
+          {ok, map()} | {error, any()}.
+get(Conn, Stream, Name, Opts) ->
+    Topic = make_js_api_topic(~"INFO", [Stream, $., Name], Opts),
     case nats:request(Conn, Topic, <<>>, #{}) of
         {ok, Response} ->
             unmarshal_response(?JS_API_V1_CONSUMER_INFO_RESPONSE, Response);
-        Other ->
-            Other
+        {error, _} = Error ->
+            Error
     end.
 
+-spec delete(Conn :: nats:conn(), Config :: map()) -> {ok, map()} | {error, timeout}.
 delete(Conn, #{stream_name := Stream, name := Name}) ->
     delete(Conn, Stream, Name, #{}).
 
+-spec delete(Conn :: nats:conn(),
+             #{name := iodata(), stream_name := iodata(), _=>_}, Opts :: map()) ->
+          {ok, map()} | {error, any()};
+            (Conn :: nats:conn(), Stream :: iodata(), Name :: iodata()) ->
+          {ok, map()} | {error, any()}.
 delete(Conn, #{stream_name := Stream, name := Name}, Opts)
   when is_map(Opts) ->
-    delete(Conn, Stream, Name, #{});
+    delete(Conn, Stream, Name, Opts);
 
-delete(Conn, Stream, Name)
-  when is_binary(Stream), is_binary(Name) ->
+delete(Conn, Stream, Name) ->
     delete(Conn, Stream, Name, #{}).
 
-delete(Conn, Stream, Name, Opts)
-  when is_binary(Stream), is_binary(Name) ->
-    Topic = make_js_api_topic(~"DELETE", <<Stream/binary, $., Name/binary>>, Opts),
+-spec delete(Conn :: nats:conn(), Stream :: iodata(), Name :: iodata(), Opts :: map()) ->
+          {ok, map()} | {error, any()}.
+delete(Conn, Stream, Name, Opts) ->
+    Topic = make_js_api_topic(~"DELETE", [Stream, $., Name], Opts),
     case nats:request(Conn, Topic, <<>>, #{}) of
         {ok, Response} ->
             unmarshal_response(?JS_API_V1_CONSUMER_DELETE_RESPONSE, Response);
@@ -136,36 +158,47 @@ delete(Conn, Stream, Name, Opts)
     end.
 
 %% the caller is responsible for setting up a subscription on reply_to / deliver_subject.
+-spec msg_next(Conn :: nats:conn(),
+               #{config := #{deliver_subject := iodata(), _=>_},
+                 name := iodata(), stream_name := iodata(), _=>_},
+               Opts :: map()) -> ok | {error, timeout}.
 msg_next(Conn, #{stream_name := Stream, name := Name,
                  config := #{deliver_subject := ReplyTo}}, Opts)
-  when is_binary(Stream), is_binary(Name), is_binary(ReplyTo), is_map(Opts) ->
+  when is_map(Opts) ->
     msg_next(Conn, Stream, Name, ReplyTo, Opts).
 
+-spec msg_next(Conn :: nats:conn(), Stream :: iodata(), Name :: iodata(),
+               ReplyTo :: iodata(), Opts :: map()) -> ok | {error, timeout}.
 msg_next(Conn, Stream, Name, ReplyTo, Opts)
-  when is_binary(Stream), is_binary(Name), is_binary(ReplyTo), is_map(Opts) ->
+  when is_map(Opts) ->
     msg_next(Conn, Stream, Name, ReplyTo,
              maps:without(?API_OPTS, Opts), maps:with(?API_OPTS, Opts)).
 
 %% msg_next/6
 msg_next(Conn, Stream, Name, ReplyTo, Request, Opts)
-  when is_binary(Stream), is_binary(Name), is_binary(ReplyTo),
-       is_map(Request), is_map(Opts) ->
+  when is_map(Request), is_map(Opts) ->
     msg_next_pub(Conn, Stream, Name, ReplyTo, json:encode(Request), Opts);
 msg_next(Conn, Stream, Name, ReplyTo, Request, Opts)
-  when is_binary(Stream), is_binary(Name), is_binary(ReplyTo),
-       is_integer(Request), is_map(Opts) ->
+  when is_integer(Request), is_map(Opts) ->
     msg_next_pub(Conn, Stream, Name, ReplyTo, integer_to_binary(Request), Opts).
 
+-spec msg_next(Conn :: nats:conn(), Stream :: iodata(), Name :: iodata(),
+               ReplyTo :: iodata(), Request :: map() | integer(), Opts :: map()) ->
+          ok | {error, any()}.
 msg_next_pub(Conn, Stream, Name, ReplyTo, Request, Opts) ->
-    Topic = make_js_api_topic(~"MSG.NEXT", <<Stream/binary, $., Name/binary>>, Opts),
+    Topic = make_js_api_topic(~"MSG.NEXT", [Stream, $., Name], Opts),
     nats:pub(Conn, Topic, Request, Opts#{reply_to => ReplyTo}).
 
+-spec subscribe(Conn :: nats:conn(), Config :: map(), Opts :: map()) ->
+          {ok, pid()} | {error, any()} | {error, not_deliver_subject}.
 subscribe(Conn, #{stream_name := _, name := _,
                   config := #{deliver_subject := DeliverSubject}}, _Opts) ->
     nats:sub(Conn, DeliverSubject);
 subscribe(_Conn, #{stream_name := _, name := _}, _Opts) ->
     {error, not_deliver_subject}.
 
+-spec subscribe(Conn :: nats:conn(), Stream :: iodata(), Name :: iodata(), Opts :: map()) ->
+          {ok, pid()} | {error, any()} | {error, not_a_push_consumer}.
 subscribe(Conn, Stream, Name, _Opts) ->
     maybe
         {ok, #{type := ?JS_API_V1_CONSUMER_INFO_RESPONSE} = Config} ?= get(Conn, Stream, Name),
@@ -177,12 +210,16 @@ subscribe(Conn, Stream, Name, _Opts) ->
         end
     end.
 
+-spec unsubscribe(Conn :: nats:conn(), Config :: map(), Opts :: map()) ->
+          ok | {error, any()} | {error, not_a_a_push_consumer}.
 unsubscribe(Conn, #{stream_name := _, name := _,
                     config := #{deliver_subject := DeliverSubject}}, _Opts) ->
     nats:unsub(Conn, DeliverSubject);
 unsubscribe(_Conn, #{stream_name := _, name := _}, _Opts) ->
     {error, not_a_push_consumer}.
 
+-spec unsubscribe(Conn :: nats:conn(), Stream :: iodata(), Name :: iodata(), Opts :: map()) ->
+          ok | {error, any()} | {error, not_a_push_consumer}.
 unsubscribe(Conn, Stream, Name, _Opts) ->
     maybe
         {ok, #{type := ?JS_API_V1_CONSUMER_INFO_RESPONSE} = Config} ?= get(Conn, Stream, Name),
@@ -194,6 +231,8 @@ unsubscribe(Conn, Stream, Name, _Opts) ->
         end
     end.
 
+-spec ack_msg(Conn :: nats:conn(), AckType :: atom() | tuple(),
+              Sync :: boolean(), Opts :: map()) -> map().
 ack_msg(_Conn, _AckType, _Sync, #{acked := true} = Opts) ->
     Opts;
 ack_msg(Conn, AckType, Sync, #{reply_to := ReplyTo} = Opts) ->
@@ -225,12 +264,15 @@ make_js_api_create_topic(ConsumerId, Opts) ->
     make_js_api_topic(~"CREATE", ConsumerId, Opts).
 
 make_js_api_topic(Op, Topic, #{domain := Domain}) ->
-    <<"$JS.", Domain/binary, ".API.CONSUMER.", Op/binary, $., Topic/binary>>;
+    [~"$JS.", Domain, ~".API.CONSUMER.", Op, $., Topic];
 make_js_api_topic(Op, Topic, _) ->
-    <<"$JS.API.CONSUMER.", Op/binary, $., Topic/binary>>.
+    [~"$JS.API.CONSUMER.", Op, $., Topic].
 
 to_atom(Bin) when is_binary(Bin) ->
     try binary_to_existing_atom(Bin) catch _:_ -> Bin end.
+
+to_bin(Bin) when is_binary(Bin) -> Bin;
+to_bin(List) when is_list(List) -> iolist_to_binary(List).
 
 json_object_push(<<"type">>, Value, Acc)
   when is_binary(Value) ->

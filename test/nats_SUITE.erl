@@ -144,7 +144,12 @@ pub_ok(_) ->
     {ok, Host, Port} = nats_addr(),
     {ok, C} = nats:connect(Host, Port),
     receive {C, ready} -> ok end,
+    %% binaries
     nats:pub(C, <<"foo.bar">>, <<"My payload">> ),
+    %% iolist
+    nats:pub(C, [<<"foo">>, <<".">>, <<"bar">>], [<<"My">>, [<<" ">>], <<"payload">>]),
+    %% improper iolist
+    nats:pub(C, [<<"foo">>, <<".">> | <<"bar">>], [<<"My">>, [<<" ">>], <<"payload">>]),
     timer:sleep(100).
 
 pub_verbose_ok(_) ->

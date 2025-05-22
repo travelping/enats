@@ -64,7 +64,7 @@
           %% Bucket is the name of the KeyValue store. Bucket name has to be
           %% unique and can only contain alphanumeric characters, dashes, and
           %% underscores.
-          bucket         := binary(),
+          bucket         := iodata(),
 
           %% Description is an optional description for the KeyValue store.
           description    => binary(),
@@ -117,9 +117,8 @@
 %%%===================================================================
 
 -doc #{equiv => get_bucket(Conn, Bucket, #{})}.
--spec get_bucket(Conn :: pid(), Bucket :: binary()) -> {ok, map()} | {error, term()}.
-get_bucket(Conn, Bucket)
-  when is_binary(Bucket) ->
+-spec get_bucket(Conn :: nats:conn(), Bucket :: iodata()) -> {ok, map()} | {error, term()}.
+get_bucket(Conn, Bucket) ->
     get_bucket(Conn, Bucket, #{}).
 
 -doc """
@@ -128,16 +127,14 @@ Retrieves the configuration of a KeyValue store bucket with additional options.
 Allows specifying options for the underlying NATS request.
 Returns `{ok, Config}` or `{error, Reason}`.
 """.
--spec get_bucket(Conn :: pid(), Bucket :: binary(), Opts :: map()) ->
+-spec get_bucket(Conn :: nats:conn(), Bucket :: iodata(), Opts :: map()) ->
           {ok, map()} | {error, term()}.
-get_bucket(Conn, Bucket, Opts)
-  when is_binary(Bucket) ->
+get_bucket(Conn, Bucket, Opts) ->
     nats_stream:get(Conn, ?BUCKET_NAME(Bucket), Opts).
 
 -doc #{equiv => create_bucket(Conn, #{bucket => Bucket}, #{})}.
--spec create_bucket(Conn :: pid(), Bucket :: binary()) -> {ok, map()} | {error, term()}.
-create_bucket(Conn, Bucket)
-  when is_binary(Bucket) ->
+-spec create_bucket(Conn :: nats:conn(), Bucket :: iodata()) -> {ok, map()} | {error, term()}.
+create_bucket(Conn, Bucket) ->
     create_bucket(Conn, #{bucket => Bucket}, #{}).
 
 -doc """
@@ -147,10 +144,9 @@ Creates a KeyValue store bucket with the specified configuration and options.
 `Opts` allows specifying options for the underlying NATS request.
 Returns `{ok, map()}` on success or `{error, Reason}` on failure.
 """.
--spec create_bucket(Conn :: pid(), Config :: config(), Opts :: map()) ->
+-spec create_bucket(Conn :: nats:conn(), Config :: config(), Opts :: map()) ->
           {ok, map()} | {error, term()}.
-create_bucket(Conn, #{bucket := Bucket} = Config, Opts)
-  when is_binary(Bucket) ->
+create_bucket(Conn, Config, Opts) ->
     StreamCfg = prepare_key_value_config(Config),
     nats_stream:create(Conn, StreamCfg, Opts).
 
@@ -162,16 +158,15 @@ Returns `{ok, map()}` on success or `{error, Reason}` on failure.
 
 Equivalent to [`create_bucket(Conn, Config#{bucket => Bucket}, Opts)`](`create_bucket/3`).
 """.
--spec create_bucket(Conn :: pid(), Bucket :: binary(), Config :: map(), Opts :: map()) ->
+-spec create_bucket(Conn :: nats:conn(), Bucket :: iodata(), Config :: map(), Opts :: map()) ->
           {ok, map()} | {error, term()}.
 create_bucket(Conn, Bucket, Config, Opts)
-  when is_binary(Bucket), is_map(Config), is_map(Opts) ->
+  when is_map(Config), is_map(Opts) ->
     create_bucket(Conn, Config#{bucket => Bucket}, Opts).
 
 -doc #{equiv => update_bucket(Conn, #{bucket => Bucket}, #{})}.
--spec update_bucket(Conn :: pid(), Bucket :: binary()) -> {ok, map()} | {error, term()}.
-update_bucket(Conn, Bucket)
-  when is_binary(Bucket) ->
+-spec update_bucket(Conn :: nats:conn(), Bucket :: iodata()) -> {ok, map()} | {error, term()}.
+update_bucket(Conn, Bucket) ->
     update_bucket(Conn, #{bucket => Bucket}, #{}).
 
 -doc """
@@ -181,9 +176,8 @@ Updates an existing KeyValue store bucket with the specified configuration and o
 `Opts` allows specifying options for the underlying NATS request.
 Returns `{ok, map()}` on success or `{error, Reason}` on failure.
 """.
--spec update_bucket(Conn :: pid(), Config :: config(), Opts :: map()) -> {ok, map()} | {error, term()}.
-update_bucket(Conn, #{bucket := Bucket} = Config, Opts)
-  when is_binary(Bucket) ->
+-spec update_bucket(Conn :: nats:conn(), Config :: config(), Opts :: map()) -> {ok, map()} | {error, term()}.
+update_bucket(Conn, Config, Opts) ->
     StreamCfg = prepare_key_value_config(Config),
     nats_stream:update(Conn, StreamCfg, Opts).
 
@@ -195,16 +189,15 @@ Returns `{ok, map()}` on success or `{error, Reason}` on failure.
 
 Equivalent to [`update_bucket(Conn, Config#{bucket => Bucket}, Opts)`](`update_bucket/3`).
 """.
--spec update_bucket(Conn :: pid(), Bucket :: binary(), Config :: map(), Opts :: map()) ->
+-spec update_bucket(Conn :: nats:conn(), Bucket :: iodata(), Config :: map(), Opts :: map()) ->
           {ok, map()} | {error, term()}.
 update_bucket(Conn, Bucket, Config, Opts)
-  when is_binary(Bucket), is_map(Config), is_map(Opts) ->
+  when is_map(Config), is_map(Opts) ->
     update_bucket(Conn, Config#{bucket => Bucket}, Opts).
 
 -doc #{equiv => delete_bucket(Conn, Bucket, #{})}.
--spec delete_bucket(Conn :: pid(), Bucket :: binary()) -> {ok, map()} | {error, term()}.
-delete_bucket(Conn, Bucket)
-  when is_binary(Bucket) ->
+-spec delete_bucket(Conn :: nats:conn(), Bucket :: iodata()) -> {ok, map()} | {error, term()}.
+delete_bucket(Conn, Bucket) ->
     delete_bucket(Conn, Bucket, #{}).
 
 -doc """
@@ -213,10 +206,10 @@ Deletes a KeyValue store bucket with the specified options.
 Allows specifying options for the underlying NATS request.
 Returns `{ok, map()}` on success or `{error, Reason}` on failure.
 """.
--spec delete_bucket(Conn :: pid(), Bucket :: binary(), Opts :: map()) ->
+-spec delete_bucket(Conn :: nats:conn(), Bucket :: iodata(), Opts :: map()) ->
           {ok, map()} | {error, term()}.
 delete_bucket(Conn, Bucket, Opts)
-  when is_binary(Bucket), is_map(Opts) ->
+  when is_map(Opts) ->
     nats_stream:delete(Conn, ?BUCKET_NAME(Bucket), Opts).
 
 -doc """
@@ -229,9 +222,9 @@ Starts a watcher process that monitors updates to keys matching the given `Keys`
 The watcher process will send messages to the calling process's mailbox.
 Returns `{ok, Pid}` of the watcher process or `{error, Reason}` on failure.
 """.
--spec watch(Conn :: pid(), Bucket :: binary(), Keys :: binary() | [binary()], WatchOpts :: map(), Opts :: map()) -> {ok, pid()} | {error, term()}.
+-spec watch(Conn :: nats:conn(), Bucket :: iodata(), Keys :: binary() | [binary()], WatchOpts :: map(), Opts :: map()) -> {ok, pid()} | {error, term()}.
 watch(Conn, Bucket, Keys, WatchOpts, Opts)
-  when is_binary(Bucket), is_map(WatchOpts), is_map(Opts) ->
+  when is_map(WatchOpts), is_map(Opts) ->
     watch(Conn, Bucket, Keys, WatchOpts, Opts, [{spawn_opt, [link]}]).
 
 -doc """
@@ -241,9 +234,9 @@ See `watch/5` for details on `Conn`, `Bucket`, `Keys`, `WatchOpts`, and `Opts`.
 `StartOpts` are options passed to `proc_lib:spawn_opt/4` when starting the watcher process.
 Returns `{ok, Pid}` or `{error, Reason}`.
 """.
--spec watch(Conn :: pid(), Bucket :: binary(), Keys :: binary() | [binary()], WatchOpts :: map(), Opts :: map(), StartOpts :: [term()]) -> {ok, pid()} | {error, term()}.
+-spec watch(Conn :: nats:conn(), Bucket :: iodata(), Keys :: binary() | [binary()], WatchOpts :: map(), Opts :: map(), StartOpts :: [term()]) -> {ok, pid()} | {error, term()}.
 watch(Conn, Bucket, Keys, WatchOpts, Opts, StartOpts)
-  when is_binary(Bucket), is_map(WatchOpts), is_map(Opts) ->
+  when is_map(WatchOpts), is_map(Opts) ->
     nats_kv_watch:start(Conn, Bucket, Keys, WatchOpts, Opts, StartOpts).
 
 -doc """
@@ -253,9 +246,9 @@ This is a convenience function equivalent to calling `watch/5` with `Keys` set t
 `WatchOpts` and `Opts` are as described in `watch/5`.
 Returns `{ok, Pid}` or `{error, Reason}`.
 """.
--spec watch_all(Conn :: pid(), Bucket :: binary(), WatchOpts :: map(), Opts :: map()) -> {ok, pid()} | {error, term()}.
+-spec watch_all(Conn :: nats:conn(), Bucket :: iodata(), WatchOpts :: map(), Opts :: map()) -> {ok, pid()} | {error, term()}.
 watch_all(Conn, Bucket, WatchOpts, Opts)
-  when is_binary(Bucket), is_map(WatchOpts), is_map(Opts) ->
+  when is_map(WatchOpts), is_map(Opts) ->
     watch(Conn, Bucket, ~">", WatchOpts, Opts, [{spawn_opt, [link]}]).
 
 -doc """
@@ -265,13 +258,13 @@ See `watch_all/4` for details on `Conn`, `Bucket`, `WatchOpts`, and `Opts`.
 `StartOpts` are options passed to `proc_lib:spawn_opt/4`.
 Returns `{ok, Pid}` or `{error, Reason}`.
 """.
--spec watch_all(Conn :: pid(), Bucket :: binary(), WatchOpts :: map(), Opts :: map(), StartOpts :: [term()]) -> {ok, pid()} | {error, term()}.
+-spec watch_all(Conn :: nats:conn(), Bucket :: iodata(), WatchOpts :: map(), Opts :: map(), StartOpts :: [term()]) -> {ok, pid()} | {error, term()}.
 watch_all(Conn, Bucket, WatchOpts, Opts, StartOpts)
-  when is_binary(Bucket), is_map(WatchOpts), is_map(Opts) ->
+  when is_map(WatchOpts), is_map(Opts) ->
     nats_kv_watch:start(Conn, Bucket, ~">", WatchOpts, Opts, StartOpts).
 
 -doc #{equiv => select_keys(Conn, Bucket, Keys, WatchOpts, #{})}.
--spec select_keys(Conn :: pid(), Bucket :: binary(), Keys :: binary() | [binary()], WatchOpts :: map()) -> {ok, list()} | {error, term()}.
+-spec select_keys(Conn :: nats:conn(), Bucket :: iodata(), Keys :: binary() | [binary()], WatchOpts :: map()) -> {ok, list()} | {error, term()}.
 select_keys(Conn, Bucket, Keys, WatchOpts) ->
     select_keys(Conn, Bucket, Keys, WatchOpts, #{}).
 
@@ -289,7 +282,7 @@ Note that `ignore_deletes` is implicitly set to `true` for this function.
 Returns `{ok, List}` where `List` is a list of keys (binary()) or key-value pairs ({binary(), binary()}),
 or `{error, Reason}` on failure.
 """.
--spec select_keys(Conn :: pid(), Bucket :: binary(), Keys :: binary() | [binary()], WatchOpts :: map(), Opts :: map()) -> {ok, list()} | {error, term()}.
+-spec select_keys(Conn :: nats:conn(), Bucket :: iodata(), Keys :: binary() | [binary()], WatchOpts :: map(), Opts :: map()) -> {ok, list()} | {error, term()}.
 select_keys(Conn, Bucket, Keys, WatchOpts0, Opts) ->
     WatchOpts = WatchOpts0#{ignore_deletes => true,
                             cb => fun select_keys_watch_cb/3},
@@ -317,7 +310,7 @@ select_keys_loop(Pid, Acc) ->
     end.
 
 -doc #{equiv => list_keys(Conn, Bucket, WatchOpts, #{})}.
--spec list_keys(Conn :: pid(), Bucket :: binary(), WatchOpts :: map()) -> {ok, list()} | {error, term()}.
+-spec list_keys(Conn :: nats:conn(), Bucket :: iodata(), WatchOpts :: map()) -> {ok, list()} | {error, term()}.
 list_keys(Conn, Bucket, WatchOpts) ->
     list_keys(Conn, Bucket, WatchOpts, #{}).
 
@@ -330,7 +323,7 @@ Note that `ignore_deletes` is implicitly set to `true` for this function.
 `Opts` allows specifying options for the underlying NATS request.
 Returns `{ok, List}` or `{error, Reason}`.
 """.
--spec list_keys(Conn :: pid(), Bucket :: binary(), WatchOpts :: map(), Opts :: map()) -> {ok, list()} | {error, term()}.
+-spec list_keys(Conn :: nats:conn(), Bucket :: iodata(), WatchOpts :: map(), Opts :: map()) -> {ok, list()} | {error, term()}.
 list_keys(Conn, Bucket, WatchOpts, Opts) ->
     select_keys(Conn, Bucket, ~">", WatchOpts, Opts).
 
@@ -339,9 +332,11 @@ Retrieves the latest value for a key.
 
 Equivalent to [`get(Conn, Bucket, Key, last, #{})`](`get/5`).
 """.
--spec get(Conn :: pid(), Bucket :: binary(), Key :: binary()) -> {ok, binary()} | {deleted, map()} | {error, term()}.
-get(Conn, Bucket, Key)
-  when is_binary(Bucket), is_binary(Key) ->
+-spec get(Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata()) ->
+          {ok, map()} |
+          {'deleted', #{'message':=#{'hdrs':=maybe_improper_list(), _=>_}, _=>_}} |
+          {error, term()}.
+get(Conn, Bucket, Key) ->
     get(Conn, Bucket, Key, last, #{}).
 
 -doc """
@@ -354,15 +349,19 @@ If the key does not exist, an error indicating "Message Not Found" will be retur
 If the key has been deleted, `{deleted, map()}` is returned.
 Otherwise, `{ok, binary()}` is returned with the key's value.
 """.
--spec get(Conn :: pid(), Bucket :: binary(), Key :: binary(), SeqNo :: integer() | last) ->
-          {ok, binary()} | {deleted, map()} | {error, term()};
-         (Conn :: pid(), Bucket :: binary(), Key :: binary(), Opts :: map()) ->
-          {ok, binary()} | {deleted, map()} | {error, term()}.
+-spec get(Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata(), SeqNo :: integer() | last) ->
+          {ok, map()} |
+          {'deleted', #{'message':=#{'hdrs':=maybe_improper_list(), _=>_}, _=>_}} |
+          {error, term()};
+         (Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata(), Opts :: map()) ->
+          {ok, map()} |
+          {'deleted', #{'message':=#{'hdrs':=maybe_improper_list(), _=>_}, _=>_}} |
+          {error, term()}.
 get(Conn, Bucket, Key, SeqNo)
   when SeqNo =:= last; is_integer(SeqNo) ->
     get(Conn, Bucket, Key, SeqNo, #{});
 get(Conn, Bucket, Key, Opts)
-  when is_binary(Bucket), is_binary(Key), is_map(Opts) ->
+  when is_map(Opts) ->
     get(Conn, Bucket, Key, last, Opts).
 
 -doc """
@@ -376,7 +375,7 @@ If the key does not exist or the specific revision is not found, an error indica
 If the key at the specified revision has a delete or purge marker, `{deleted, map()}` is returned.
 Otherwise, `{ok, map()}` is returned containing the message details.
 """.
--spec get(Conn :: pid(), Bucket :: binary(), Key :: binary(), SeqNo :: integer() | 'last', Opts :: map()) ->
+-spec get(Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata(), SeqNo :: integer() | 'last', Opts :: map()) ->
           {'ok', map()} |
           {'deleted', #{'message':=#{'hdrs':=maybe_improper_list(), _=>_}, _=>_}} |
           {'error', term()}.
@@ -400,7 +399,7 @@ This function interacts directly with the JetStream API to fetch a message by su
 It is typically used internally by the `get/3,4,5` functions.
 Returns `{ok, map()}` containing the raw message details or `{error, Reason}`.
 """.
--spec get_msg(Conn :: pid(), Bucket :: binary(), Key :: binary(), SeqNo :: integer() | last, Opts :: map()) ->
+-spec get_msg(Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata(), SeqNo :: integer() | last, Opts :: map()) ->
           {ok, map()} | {error, term()}.
 get_msg(Conn, Bucket, Key, last, Opts) ->
     get_last_msg_for_subject(Conn, Bucket, Key, Opts);
@@ -409,7 +408,7 @@ get_msg(Conn, Bucket, Key, SeqNo, Opts)
     get_msg(Conn, Bucket, #{last_by_subject => Key, seq => SeqNo}, Opts).
 
 get_last_msg_for_subject(Conn, Bucket, Key, #{allow_direct := true} = Opts) ->
-    GetStr =  <<?BUCKET_NAME(Bucket)/binary, $., ?SUBJECT_NAME(Bucket, Key)/binary>>,
+    GetStr =  [?BUCKET_NAME(Bucket), $., ?SUBJECT_NAME(Bucket, Key)],
     Topic = make_js_direct_api_topic(~"GET", GetStr, Opts),
     case nats:request(Conn, Topic, <<>>, #{}) of
         {ok, Response} ->
@@ -446,9 +445,8 @@ If the key does not exist, it will be created. If the key exists, the value will
 A key must consist of alphanumeric characters, dashes, underscores, equal signs, and dots.
 Returns `{ok, map()}` containing the publish response details or `{error, Reason}` on failure.
 """.
--spec put(Conn :: pid(), Bucket :: binary(), Key :: binary(), Value :: binary()) -> {ok, map()} | {error, term()}.
-put(Conn, Bucket, Key, Value)
-  when is_binary(Bucket), is_binary(Key) ->
+-spec put(Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata(), Value :: iodata()) -> {ok, map()} | {error, term()}.
+put(Conn, Bucket, Key, Value) ->
     case nats:request(Conn, ?SUBJECT_NAME(Bucket, Key), Value, #{}) of
         {ok, Response} ->
             unmarshal_response(Response);
@@ -457,7 +455,7 @@ put(Conn, Bucket, Key, Value)
     end.
 
 -doc #{equiv => create(Conn, Bucket, Key, Value, #{})}.
--spec create(Conn :: pid(), Bucket :: binary(), Key :: binary(), Value :: binary()) -> {ok, map()} | {error, term()}.
+-spec create(Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata(), Value :: iodata()) -> {ok, map()} | {error, term()}.
 create(Conn, Bucket, Key, Value) ->
     create(Conn, Bucket, Key, Value, #{}).
 
@@ -469,12 +467,11 @@ See `create/4` for details on `Conn`, `Bucket`, `Key`, and `Value`.
 will return `{error, {exists, OldObj}}` where `OldObj` is the existing message details.
 Returns `{ok, map()}` or `{error, Reason}`.
 """.
--spec create(Conn :: pid(), Bucket :: binary(), Key :: binary(), Value :: binary(), Opts :: map()) -> {ok, map()} | {error, term()}.
+-spec create(Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata(), Value :: iodata(), Opts :: map()) -> {ok, map()} | {error, term()}.
 create(Conn, Bucket, Key, Value, Opts) ->
     create_do(Conn, Bucket, Key, Value, maps:merge(#{retry => true}, Opts)).
 
-create_do(Conn, Bucket, Key, Value, #{retry := Retry} = Opts)
-  when is_binary(Bucket), is_binary(Key) ->
+create_do(Conn, Bucket, Key, Value, #{retry := Retry} = Opts) ->
     case update(Conn, Bucket, Key, Value, 0) of
         {error, #{err_code := ?JS_ERR_CODE_STREAM_WRONG_LAST_SEQUENCE}} ->
             case get(Conn, Bucket, Key, last, Opts) of
@@ -506,10 +503,9 @@ of the key does not match `SeqNo`, the update will fail with an error
 indicating a wrong last sequence.
 Returns `{ok, map()}` containing the publish response details or `{error, Reason}` on failure.
 """.
--spec update(Conn :: pid(), Bucket :: binary(), Key :: binary(), Value :: binary(), SeqNo :: integer()) ->
+-spec update(Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata(), Value :: iodata(), SeqNo :: integer()) ->
           {ok, map()} | {error, term()}.
-update(Conn, Bucket, Key, Value, SeqNo)
-  when is_binary(Bucket), is_binary(Key) ->
+update(Conn, Bucket, Key, Value, SeqNo) ->
     Header =
         nats_hd:header([{?EXPECTED_LAST_SUBJ_SEQ_HDR, integer_to_binary(SeqNo)}]),
     case nats:request(Conn, ?SUBJECT_NAME(Bucket, Key), Value, #{header => Header}) of
@@ -520,7 +516,7 @@ update(Conn, Bucket, Key, Value, SeqNo)
     end.
 
 -doc #{equiv => delete(Conn, Bucket, Key, #{})}.
--spec delete(Conn :: pid(), Bucket :: binary(), Key :: binary()) -> {ok, map()} | {error, term()}.
+-spec delete(Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata()) -> {ok, map()} | {error, term()}.
 delete(Conn, Bucket, Key) ->
     delete(Conn, Bucket, Key, #{}).
 
@@ -537,9 +533,9 @@ or by using a watcher without the `ignore_deletes` option.
 - `purge`: If `true`, performs a purge instead of a regular delete (see `purge/3`).
 Returns `{ok, map()}` or `{error, Reason}`.
 """.
--spec delete(Conn :: pid(), Bucket :: binary(), Key :: binary(), Opts :: map()) -> {ok, map()} | {error, term()}.
+-spec delete(Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata(), Opts :: map()) -> {ok, map()} | {error, term()}.
 delete(Conn, Bucket, Key, Opts)
-  when is_binary(Bucket), is_binary(Key), is_map(Opts) ->
+  when is_map(Opts) ->
     Headers0 =
         case Opts of
             #{purge := true} ->
@@ -570,7 +566,7 @@ will be preserved.
 Returns `{ok, map()}` containing the publish response details for the purge marker
 or `{error, Reason}` on failure.
 """.
--spec purge(Conn :: pid(), Bucket :: binary(), Key :: binary()) -> {ok, map()} | {error, term()}.
+-spec purge(Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata()) -> {ok, map()} | {error, term()}.
 purge(Conn, Bucket, Key) ->
     purge(Conn, Bucket, Key, #{}).
 
@@ -583,7 +579,7 @@ See `purge/3` for details on `Conn`, `Bucket`, and `Key`.
   revision matches this number (conditional purge).
 Returns `{ok, map()}` or `{error, Reason}`.
 """.
--spec purge(Conn :: pid(), Bucket :: binary(), Key :: binary(), Opts :: map()) -> {ok, map()} | {error, term()}.
+-spec purge(Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata(), Opts :: map()) -> {ok, map()} | {error, term()}.
 purge(Conn, Bucket, Key, Opts) ->
     delete(Conn, Bucket, Key, Opts#{purge => true}).
 
@@ -597,15 +593,15 @@ purge(Conn, Bucket, Key, Opts) ->
 %%     <<"$JS.API.STREAM.", Op/binary>>.
 
 make_js_direct_api_topic(Op, Stream, #{domain := Domain}) ->
-    <<"$JS.", Domain/binary, ".API.DIRECT.", Op/binary, $., Stream/binary>>;
+    [~"$JS.", Domain, ~".API.DIRECT.", Op, $., Stream];
 make_js_direct_api_topic(Op, Stream, _) ->
-    <<"$JS.API.DIRECT.", Op/binary, $., Stream/binary>>.
+    [~"$JS.API.DIRECT.", Op, $., Stream].
 
 marshal_get_request(Bucket, Req) ->
     maps:map(
       fun(K, V)
             when K =:= last_by_subj; K =:= next_by_subj ->
-              ?SUBJECT_NAME(Bucket, V);
+              iolist_to_binary(?SUBJECT_NAME(Bucket, V));
          (K, V)
             when K =:= start_time; K =:= up_to_time ->
               if V < 0 ->
@@ -616,7 +612,7 @@ marshal_get_request(Bucket, Req) ->
                         calendar:system_time_to_rfc3339(V, [{unit, nanosecond}, {offset, "Z"}]))
               end;
          (multi_last, Subjects) ->
-              lists:map(fun(S) -> ?SUBJECT_NAME(Bucket, S) end, Subjects);
+              lists:map(fun(S) -> iolist_to_binary(?SUBJECT_NAME(Bucket, S)) end, Subjects);
          (batch, V) when V > 1 ->
               ?LOG(critical, "enats: batch get requests are not supported"),
               V;
@@ -698,8 +694,7 @@ get_response_msg(hdrs, V) ->
 get_response_msg(_K, V) ->
     V.
 
-prepare_key_value_config(#{bucket := Bucket} = Config)
-  when is_binary(Bucket) ->
+prepare_key_value_config(#{bucket := Bucket} = Config) ->
     DuplicateWindow =
         case Config of
             #{ttl := TTL} when TTL > 0, TTL < 2 * ?MINUTE_NS ->
@@ -714,7 +709,7 @@ prepare_key_value_config(#{bucket := Bucket} = Config)
         end,
     StreamCfg =
         #{
-          name                  => ?BUCKET_NAME(Bucket),
+          name                  => iolist_to_binary(?BUCKET_NAME(Bucket)),
           max_msgs_per_subject  => 1,
           max_bytes             => -1,
           max_age               => maps:get(ttl, Config, 0),
@@ -727,7 +722,7 @@ prepare_key_value_config(#{bucket := Bucket} = Config)
           max_consumers         => -1,
           allow_direct          => true,
           compression           => Compression,
-          subjects              => [?SUBJECT_NAME(Bucket, ~">")]
+          subjects              => [iolist_to_binary(?SUBJECT_NAME(Bucket, ~">"))]
           %% discard            => discardnew,
          },
     maps:merge(StreamCfg,

@@ -40,7 +40,8 @@
 -export([serve/2,
          service_reply/2,
          service_reply/3,
-         service/4, endpoint/2]).
+         service/4, endpoint/2,
+         monitor/1]).
 -export([rnd_topic_id/0]).
 
 %% debug functions
@@ -261,15 +262,17 @@
                   _              => _
                  }.
 
--export_type([sid/0, notify_fun/0]).
+-export_type([sid/0, notify_fun/0, conn/0]).
 
 -opaque sid() :: {'$sid', integer()}.
+-opaque conn() :: pid().
+
 -type notify_fun() :: fun((Sid :: sid(),
                            Subject :: binary(),
                            Payload :: binary(),
                            MsgOpts :: map()) -> any()).
 
--record(nats_req, {conn     :: pid(),
+-record(nats_req, {conn     :: conn(),
                    svc      :: binary(),
                    id       :: binary(),
                    reply_to :: undefined | binary()
@@ -299,7 +302,7 @@ Starts the NATS client process.
 This function is typically used internally by the `connect/1,2,3` functions.
 """.
 -spec start_link(Opts :: server_opts()) ->
-          {ok, Pid :: pid()} |
+          {ok, Conn :: conn()} |
           ignore |
           {error, Error :: term()}.
 start_link(Opts) ->
@@ -310,7 +313,7 @@ Connects to a NATS server or cluster using the specified options.
 This function supports the v1 options format, including a list of servers.
 """.
 -spec connect(Opts :: v1_opts()) ->
-          {ok, Pid :: pid()} |
+          {ok, Conn :: conn()} |
           ignore |
           {error, Error :: term()}.
 connect(#{servers := Servers0} = Opts0) ->
@@ -320,17 +323,17 @@ connect(#{servers := Servers0} = Opts0) ->
 
 -spec connect(Server :: nats_server_info(),
               Opts :: v0_opts()) ->
-          {ok, Pid :: pid()} |
+          {ok, Conn :: conn()} |
           ignore |
           {error, Error :: term()};
              (Servers :: [nats_server_info()],
               Opts :: v0_opts()) ->
-          {ok, Pid :: pid()} |
+          {ok, Conn :: conn()} |
           ignore |
           {error, Error :: term()};
              (Host :: nats_host(),
               Port :: inet:port_number()) ->
-          {ok, Pid :: pid()} |
+          {ok, Conn :: conn()} |
           ignore |
           {error, Error :: term()}.
 -doc """
@@ -347,7 +350,7 @@ connect(Host, Port) when is_integer(Port) ->
 -spec connect(Host :: nats_host(),
               Port :: inet:port_number(),
               Opts :: v0_opts()) ->
-          {ok, Pid :: pid()} |
+          {ok, Conn :: conn()} |
           ignore |
           {error, Error :: term()}.
 -doc """
@@ -359,14 +362,14 @@ connect(Host, Port, Opts) ->
 -doc """
 Flushes the pending messages to the NATS server.
 """.
--spec flush(Server :: pid()) -> ok | {error, timeout}.
+-spec flush(Server :: conn()) -> ok | {error, timeout}.
 flush(Server) ->
     gen_statem:call(Server, flush).
 
 -doc """
 Publishes a message with no payload and default options to the specified subject.
 """.
--spec pub(Server :: pid(), Subject :: iodata()) -> ok | {error, timeout}.
+-spec pub(Server :: conn(), Subject :: iodata()) -> ok | {error, timeout}.
 pub(Server, Subject) ->
     pub(Server, Subject, <<>>, #{}).
 
@@ -374,8 +377,8 @@ pub(Server, Subject) ->
 Publishes a message with either no payload and specified options to the specified subject, or
 with the specified payload and default options to the specified subject.
 """.
--spec pub(Server :: pid(), Subject :: iodata(), Payload :: iodata()) -> ok | {error, timeout};
-         (Server :: pid(), Subject :: iodata(), Opts :: map()) -> ok | {error, timeout}.
+-spec pub(Server :: conn(), Subject :: iodata(), Payload :: iodata()) -> ok | {error, timeout};
+         (Server :: conn(), Subject :: iodata(), Opts :: map()) -> ok | {error, timeout}.
 pub(Server, Subject, Opts)
   when is_map(Opts) ->
     pub(Server, Subject, <<>>, Opts);
@@ -385,7 +388,7 @@ pub(Server, Subject, Payload) ->
 -doc """
 Publishes a message with the specified payload and options to the specified subject.
 """.
--spec pub(Server :: pid(), Subject :: iodata(), Payload :: iodata(), Opts :: map()) -> ok | {error, timeout}.
+-spec pub(Server :: conn(), Subject :: iodata(), Payload :: iodata(), Opts :: map()) -> ok | {error, timeout}.
 pub(Server, Subject, Payload, Opts) ->
     call_with_ctx(
       ~"nats: pub", #{},
@@ -394,14 +397,14 @@ pub(Server, Subject, Payload, Opts) ->
 -doc """
 Subscribes to the specified subject with default options.
 """.
--spec sub(Server :: pid(), Subject :: iodata()) -> {ok, sid()} | {error, timeout | not_ready}.
+-spec sub(Server :: conn(), Subject :: iodata()) -> {ok, sid()} | {error, timeout | not_ready}.
 sub(Server, Subject) ->
     sub(Server, Subject, #{}).
 
 -doc """
 Subscribes to the specified subject with the given options.
 """.
--spec sub(Server :: pid(), Subject :: iodata(), Opts :: map()) -> {ok, sid()} | {error, timeout | not_ready}.
+-spec sub(Server :: conn(), Subject :: iodata(), Opts :: map()) -> {ok, sid()} | {error, timeout | not_ready}.
 sub(Server, Subject, Opts) ->
     call_with_ctx(
       ~"nats: sub", #{},
@@ -410,13 +413,13 @@ sub(Server, Subject, Opts) ->
 -doc """
 Unsubscribes from the specified subscription reference.
 """.
--spec unsub(Server :: pid(), SRef :: sid()) -> ok | {error, timeout | not_ready | invalid_session_ref}.
+-spec unsub(Server :: conn(), SRef :: sid()) -> ok | {error, timeout | not_ready | invalid_session_ref}.
 unsub(Server, SRef) ->
     unsub(Server, SRef, #{}).
 -doc """
 Unsubscribes from the specified subscription reference with options (e.g., max messages).
 """.
--spec unsub(Server :: pid(), SRef :: sid(), Opts :: map()) -> ok | {error, timeout | not_ready | invalid_session_ref}.
+-spec unsub(Server :: conn(), SRef :: sid(), Opts :: map()) -> ok | {error, timeout | not_ready | invalid_session_ref}.
 unsub(Server, SRef, Opts) ->
     call_with_ctx(
       ~"nats: unsub", #{},
@@ -428,7 +431,7 @@ unsub(Server, SRef, Opts) ->
 -doc """
 Sends a request message and waits for a single reply.
 """.
--spec request(Server :: pid(), Subject :: iodata(), Payload :: iodata(), Opts :: map()) ->
+-spec request(Server :: conn(), Subject :: iodata(), Payload :: iodata(), Opts :: map()) ->
           {ok, {Payload :: iodata(), MsgOpts :: map()}} |
           {error, timeout | not_ready | no_responders}.
 request(Server, Subject, Payload, Opts) ->
@@ -454,7 +457,7 @@ request(Server, Subject, Payload, Opts) ->
 -doc """
 Registers a service with the NATS server.
 """.
--spec serve(Server :: pid(), Service :: #svc{}) -> ok | {error, timeout | not_ready}.
+-spec serve(Server :: conn(), Service :: #svc{}) -> ok | {error, timeout | not_ready}.
 serve(Server, Service) ->
     gen_statem:call(Server, {serve, Service}).
 
@@ -483,14 +486,14 @@ service_reply(#nats_req{conn = Server, reply_to = ReplyTo} = ReplyKey, Header, P
 -doc """
 Disconnects the client from the NATS server.
 """.
--spec disconnect(Server :: pid()) -> ok | {error, timeout}.
+-spec disconnect(Server :: conn()) -> ok | {error, timeout}.
 disconnect(Server) ->
     gen_statem:call(Server, disconnect).
 
 -doc """
 Checks if the client is ready to send and receive messages.
 """.
--spec is_ready(Server :: pid()) -> boolean() | {error, timeout | not_found}.
+-spec is_ready(Server :: conn()) -> boolean() | {error, timeout | not_found}.
 is_ready(Server) ->
     try
         gen_statem:call(Server, is_ready)
@@ -504,28 +507,28 @@ is_ready(Server) ->
 -doc """
 Dumps the current subscriptions for debugging purposes.
 """.
--spec dump_subs(Server :: pid()) -> list().
+-spec dump_subs(Server :: conn()) -> list().
 dump_subs(Server) ->
     gen_statem:call(Server, dump_subs).
 
 -doc """
 Retrieves the server information received during connection.
 """.
--spec server_info(Server :: pid()) -> {ok, map()} | {error, timeout | closed}.
+-spec server_info(Server :: conn()) -> {ok, map()} | {error, timeout | closed}.
 server_info(Server) ->
     gen_statem:call(Server, server_info).
 
 -doc """
 Retrieves the local socket address of the connection.
 """.
--spec sockname(Server :: pid()) -> {ok, map()} | {error, timeout | closed}.
+-spec sockname(Server :: conn()) -> {ok, map()} | {error, timeout | closed}.
 sockname(Server) ->
     gen_statem:call(Server, sockname).
 
 -doc """
 Retrieves the remote peer address of the connection.
 """.
--spec peername(Server :: pid()) -> {ok, map()} | {error, timeout | closed}.
+-spec peername(Server :: conn()) -> {ok, map()} | {error, timeout | closed}.
 peername(Server) ->
     gen_statem:call(Server, peername).
 
@@ -550,6 +553,11 @@ Generates a random topic ID.
 -spec rnd_topic_id() -> binary().
 rnd_topic_id() ->
     base62enc(rand:uniform(16#ffffffffffffffffffffffffffffffff)).
+
+-doc false.
+-spec monitor(Server :: conn()) -> reference().
+monitor(Server) ->
+    monitor(process, Server).
 
 %%%===================================================================
 %%% gen_statem callbacks

@@ -250,13 +250,13 @@ purge(Conn, Name)
     purge(Conn, Name, #{}).
 
 purge(Conn, Name, Opts0)
-  when is_binary(Name), is_map(Opts0) ->
+  when is_map(Opts0) ->
     Msg = maps:with([filter, seq, keep], Opts0),
     Opts = maps:without([filter, seq, keep], Opts0),
     purge(Conn, Name, Msg, Opts).
 
 purge(Conn, Name, Msg, Opts)
-  when is_binary(Name), is_map(Msg), is_map(Opts) ->
+  when is_map(Msg), is_map(Opts) ->
     Topic = make_js_api_topic(~"PURGE", Name, Opts),
     case nats:request(Conn, Topic, json_encode(Msg), #{}) of
         {ok, Response} ->

@@ -45,7 +45,8 @@
 
 -record(state, {module            :: module(),
                 modstate          :: term(),
-                conn              :: pid(),
+                conn              :: nats:conn(),
+                mref              :: reference(),
                 durable           :: boolean(),
                 config            :: map(),
                 stream            :: binary(),
@@ -62,10 +63,10 @@
 %%%===================================================================
 
 start_link(Module, Conn, Stream, Name, NatsOpts, Options) ->
-    gen_server:start_link(?MODULE, [Module, Conn, Stream, Name, NatsOpts], Options).
+    gen_server:start_link(?MODULE, {Module, Conn, Stream, Name, NatsOpts}, Options).
 
 start_link(ServerName, Module, Conn, Stream, Name, NatsOpts, Options) ->
-    gen_server:start_link(ServerName, ?MODULE, [Module, Conn, Stream, Name, NatsOpts], Options).
+    gen_server:start_link(ServerName, ?MODULE, {Module, Conn, Stream, Name, NatsOpts}, Options).
 
 stop(ServerRef) ->
     gen_server:stop(ServerRef).
@@ -74,10 +75,10 @@ stop(ServerRef) ->
 %%% gen_server callbacks
 %%%===================================================================
 
-init([Module, Conn, Stream, Name, NatsOpts]) ->
+-spec init({Module :: atom(), Conn :: nats:conn(),
+            Stream :: iodata(), Name :: iodata(), NatsOpts :: map()}) -> any().
+init({Module, Conn, Stream, Name, NatsOpts}) ->
     process_flag(trap_exit, true),
-
-    monitor(process, Conn),
 
     maybe
         {ok, Config} ?= nats_consumer:get(Conn, Stream, Name, NatsOpts),
@@ -100,6 +101,7 @@ init([Module, Conn, Stream, Name, NatsOpts]) ->
                    module = Module,
                    modstate = ModState,
                    conn = Conn,
+                   mref = nats:monitor(Conn),
                    durable = Durable,
                    config = Config,
                    stream = Stream,
@@ -129,7 +131,7 @@ handle_info({Conn, Sid, {msg, Subject, Message, Opts}},
             #state{module = Module, modstate = ModStateIn, conn = Conn, sid = Sid} = State) ->
     ?LOG(debug, "~s: Subject: ~0p, Message: ~0p", [Subject, Message]),
     {AckType, ModStateOut} = Module:handle_message(Subject, Message, Opts, ModStateIn),
-    nats_consumer:ack_msg(Conn, AckType, false, Opts),
+    _ = nats_consumer:ack_msg(Conn, AckType, false, Opts),
 
     BatchOutstanding =
         case State of

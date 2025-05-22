@@ -343,14 +343,14 @@ msg_delete(Conn, Name, SeqNo, NoErase, Opts) ->
 %%%===================================================================
 
 make_js_api_topic(Op, #{domain := Domain}) ->
-    <<"$JS.", Domain/binary, ".API.STREAM.", Op/binary>>;
+    [~"$JS.", Domain, ~".API.STREAM.", Op];
 make_js_api_topic(Op, _) ->
-    <<"$JS.API.STREAM.", Op/binary>>.
+    [~"$JS.API.STREAM.", Op].
 
 make_js_api_topic(Op, Stream, #{domain := Domain}) ->
-    <<"$JS.", Domain/binary, ".API.STREAM.", Op/binary, $., Stream/binary>>;
+    [~"$JS.", Domain, ~".API.STREAM.", Op, $., Stream];
 make_js_api_topic(Op, Stream, _) ->
-    <<"$JS.API.STREAM.", Op/binary, $., Stream/binary>>.
+    [~"$JS.API.STREAM.", Op, $., Stream].
 
 to_atom(Bin) when is_binary(Bin) ->
     try binary_to_existing_atom(Bin) catch _:_ -> Bin end.

@@ -1,8 +1,8 @@
 %% one minute in nanoseconds (10^-9)
 -define(MINUTE_NS, 60 * 1_000_000_000).
--define(BUCKET_NAME(Bucket), <<"KV_", Bucket/binary>>).
--define(SUBJECT_NAME(Bucket), <<"$KV.", Bucket/binary>>).
--define(SUBJECT_NAME(Bucket, KeyPart), <<"$KV.", Bucket/binary, $., KeyPart/binary>>).
+-define(BUCKET_NAME(Bucket), [~"KV_", Bucket]).
+-define(SUBJECT_NAME(Bucket), [~"$KV.", Bucket]).
+-define(SUBJECT_NAME(Bucket, KeyPart), [~"$KV.", Bucket, $., KeyPart]).
 
 %% Headers for published messages.
 -define(MSG_ID_HDR,                 ~"Nats-Msg-Id").

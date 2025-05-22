@@ -366,7 +366,7 @@ flush(Server) ->
 -doc """
 Publishes a message with no payload and default options to the specified subject.
 """.
--spec pub(Server :: pid(), Subject :: binary()) -> ok | {error, timeout}.
+-spec pub(Server :: pid(), Subject :: iodata()) -> ok | {error, timeout}.
 pub(Server, Subject) ->
     pub(Server, Subject, <<>>, #{}).
 
@@ -374,8 +374,8 @@ pub(Server, Subject) ->
 Publishes a message with either no payload and specified options to the specified subject, or
 with the specified payload and default options to the specified subject.
 """.
--spec pub(Server :: pid(), Subject :: binary(), Payload :: binary()) -> ok | {error, timeout};
-         (Server :: pid(), Subject :: binary(), Opts :: map()) -> ok | {error, timeout}.
+-spec pub(Server :: pid(), Subject :: iodata(), Payload :: iodata()) -> ok | {error, timeout};
+         (Server :: pid(), Subject :: iodata(), Opts :: map()) -> ok | {error, timeout}.
 pub(Server, Subject, Opts)
   when is_map(Opts) ->
     pub(Server, Subject, <<>>, Opts);
@@ -385,7 +385,7 @@ pub(Server, Subject, Payload) ->
 -doc """
 Publishes a message with the specified payload and options to the specified subject.
 """.
--spec pub(Server :: pid(), Subject :: binary(), Payload :: binary(), Opts :: map()) -> ok | {error, timeout}.
+-spec pub(Server :: pid(), Subject :: iodata(), Payload :: iodata(), Opts :: map()) -> ok | {error, timeout}.
 pub(Server, Subject, Payload, Opts) ->
     call_with_ctx(
       ~"nats: pub", #{},
@@ -394,14 +394,14 @@ pub(Server, Subject, Payload, Opts) ->
 -doc """
 Subscribes to the specified subject with default options.
 """.
--spec sub(Server :: pid(), Subject :: binary()) -> {ok, sid()} | {error, timeout | not_ready}.
+-spec sub(Server :: pid(), Subject :: iodata()) -> {ok, sid()} | {error, timeout | not_ready}.
 sub(Server, Subject) ->
     sub(Server, Subject, #{}).
 
 -doc """
 Subscribes to the specified subject with the given options.
 """.
--spec sub(Server :: pid(), Subject :: binary(), Opts :: map()) -> {ok, sid()} | {error, timeout | not_ready}.
+-spec sub(Server :: pid(), Subject :: iodata(), Opts :: map()) -> {ok, sid()} | {error, timeout | not_ready}.
 sub(Server, Subject, Opts) ->
     call_with_ctx(
       ~"nats: sub", #{},
@@ -428,8 +428,8 @@ unsub(Server, SRef, Opts) ->
 -doc """
 Sends a request message and waits for a single reply.
 """.
--spec request(Server :: pid(), Subject :: binary(), Payload :: binary(), Opts :: map()) ->
-          {ok, {Payload :: binary(), MsgOpts :: map()}} |
+-spec request(Server :: pid(), Subject :: iodata(), Payload :: iodata(), Opts :: map()) ->
+          {ok, {Payload :: iodata(), MsgOpts :: map()}} |
           {error, timeout | not_ready | no_responders}.
 request(Server, Subject, Payload, Opts) ->
     maybe
@@ -461,7 +461,7 @@ serve(Server, Service) ->
 -doc """
 Sends a reply to a service request.
 """.
--spec service_reply(ReplyKey :: #nats_req{}, Payload :: binary()) -> ok.
+-spec service_reply(ReplyKey :: #nats_req{}, Payload :: iodata()) -> ok.
 service_reply(#nats_req{reply_to = undefined}, _Payload) ->
     ok;
 service_reply(#nats_req{conn = Server, reply_to = ReplyTo} = ReplyKey, Payload) ->
@@ -472,7 +472,7 @@ service_reply(#nats_req{conn = Server, reply_to = ReplyTo} = ReplyKey, Payload) 
 -doc """
 Sends a reply with headers to a service request.
 """.
--spec service_reply(ReplyKey :: #nats_req{}, Header :: binary(), Payload :: binary()) -> ok.
+-spec service_reply(ReplyKey :: #nats_req{}, Header :: binary(), Payload :: iodata()) -> ok.
 service_reply(#nats_req{reply_to = undefined}, _Header, _Payload) ->
     ok;
 service_reply(#nats_req{conn = Server, reply_to = ReplyTo} = ReplyKey, Header, Payload) ->

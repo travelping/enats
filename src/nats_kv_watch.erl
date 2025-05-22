@@ -134,7 +134,7 @@ init([Conn, Bucket, Keys, #{owner := Owner} = WatchOpts, Opts]) ->
     InitCnt = maps:get(num_pending, Watch, 0),
     Data0 = #data{
                owner = Owner,
-               subj_pre = ?SUBJECT_NAME(Bucket, <<>>),
+               subj_pre = iolist_to_binary(?SUBJECT_NAME(Bucket, <<>>)),
                conn = Conn,
                watch = Watch,
                sid = Sid,
@@ -238,10 +238,11 @@ handle_message({msg, _, _, MsgOpts} = Msg,
 
 filter_subjects(Bucket, Key, WatchConfig)
   when is_binary(Key) ->
-    WatchConfig#{filter_subject => ?SUBJECT_NAME(Bucket, Key)};
+    WatchConfig#{filter_subject => iolist_to_binary(?SUBJECT_NAME(Bucket, Key))};
 filter_subjects(Bucket, Keys, WatchConfig)
   when is_list(Keys) ->
-    WatchConfig#{filter_subjects => [?SUBJECT_NAME(Bucket, Key) || Key <- Keys]}.
+    WatchConfig#{filter_subjects =>
+                     [iolist_to_binary(?SUBJECT_NAME(Bucket, Key)) || Key <- Keys]}.
 
 parse_msg({msg, Subject, Value, Opts}, #data{subj_pre = Pre}) ->
     Key = case Subject of

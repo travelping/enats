@@ -59,30 +59,28 @@ types(v1) ->
      ?JS_API_V1_CONSUMER_NAMES_RESPONSE,
      ?JS_API_V1_CONSUMER_PAUSE_RESPONSE].
 
-create(Conn, Stream)
-  when is_binary(Stream) ->
+create(Conn, Stream) ->
     create(Conn, Stream, #{}, #{}).
 
-create(Conn, Stream, Name)
-  when is_binary(Stream), is_binary(Name) ->
-    create(Conn, Stream, Name, #{});
-
 create(Conn, Stream, Opts)
-  when is_binary(Stream), is_map(Opts) ->
-    create(Conn, Stream, maps:without(?API_OPTS, Opts), maps:with(?API_OPTS, Opts)).
+  when is_map(Opts) ->
+    create(Conn, Stream, maps:without(?API_OPTS, Opts), maps:with(?API_OPTS, Opts));
 
-create(Conn, Stream, Name, Opts)
-  when is_binary(Stream), is_binary(Name), is_map(Opts) ->
-    create(Conn, Stream, Name, maps:without(?API_OPTS, Opts), maps:with(?API_OPTS, Opts));
+create(Conn, Stream, Name) ->
+    create(Conn, Stream, Name, #{}).
 
 create(Conn, Stream, Config, Opts)
-  when is_binary(Stream), is_map(Config), is_map(Opts) ->
-    create_req(Conn, Stream, Config#{stream_name => Stream}, Opts).
+  when is_map(Config), is_map(Opts) ->
+    create_req(Conn, Stream, Config#{stream_name => to_bin(Stream)}, Opts);
+
+create(Conn, Stream, Name, Opts)
+  when is_map(Opts) ->
+    create(Conn, Stream, Name, maps:without(?API_OPTS, Opts), maps:with(?API_OPTS, Opts)).
 
 create(Conn, Stream, Name, Config, Opts)
-  when is_binary(Stream), is_binary(Name), is_map(Config), is_map(Opts) ->
-    ConsumerId = <<Stream/binary, $., Name/binary>>,
-    create_req(Conn, ConsumerId, Config#{stream_name => Stream, name => Name}, Opts).
+  when is_map(Config), is_map(Opts) ->
+    ConsumerId = [Stream, $., Name],
+    create_req(Conn, ConsumerId, Config#{stream_name => to_bin(Stream), name => to_bin(Name)}, Opts).
 
 create_req(Conn, ConsumerId, Config, Opts) ->
     Topic = make_js_api_create_topic(ConsumerId, Opts),
@@ -127,7 +125,7 @@ delete(Conn, Stream, Name)
 
 delete(Conn, Stream, Name, Opts)
   when is_binary(Stream), is_binary(Name) ->
-    Topic = make_js_api_topic(~"DELETE", <<Stream/binary, $., Name/binary>>, Opts),
+    Topic = make_js_api_topic(~"DELETE", [Stream, $., Name], Opts),
     case nats:request(Conn, Topic, <<>>, #{}) of
         {ok, Response} ->
             unmarshal_response(?JS_API_V1_CONSUMER_DELETE_RESPONSE, Response);
@@ -157,7 +155,7 @@ msg_next(Conn, Stream, Name, ReplyTo, Request, Opts)
     msg_next_pub(Conn, Stream, Name, ReplyTo, integer_to_binary(Request), Opts).
 
 msg_next_pub(Conn, Stream, Name, ReplyTo, Request, Opts) ->
-    Topic = make_js_api_topic(~"MSG.NEXT", <<Stream/binary, $., Name/binary>>, Opts),
+    Topic = make_js_api_topic(~"MSG.NEXT", [Stream, $., Name], Opts),
     nats:pub(Conn, Topic, Request, Opts#{reply_to => ReplyTo}).
 
 subscribe(Conn, #{stream_name := _, name := _,
@@ -225,12 +223,15 @@ make_js_api_create_topic(ConsumerId, Opts) ->
     make_js_api_topic(~"CREATE", ConsumerId, Opts).
 
 make_js_api_topic(Op, Topic, #{domain := Domain}) ->
-    <<"$JS.", Domain/binary, ".API.CONSUMER.", Op/binary, $., Topic/binary>>;
+    [~"$JS.", Domain, ~".API.CONSUMER.", Op, $., Topic];
 make_js_api_topic(Op, Topic, _) ->
-    <<"$JS.API.CONSUMER.", Op/binary, $., Topic/binary>>.
+    [~"$JS.API.CONSUMER.", Op, $., Topic].
 
 to_atom(Bin) when is_binary(Bin) ->
     try binary_to_existing_atom(Bin) catch _:_ -> Bin end.
+
+to_bin(Bin) when is_binary(Bin) -> Bin;
+to_bin(List) when is_list(List) -> iolist_to_binary(List).
 
 json_object_push(<<"type">>, Value, Acc)
   when is_binary(Value) ->

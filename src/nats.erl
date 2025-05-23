@@ -34,7 +34,8 @@
          server_info/1,
          sockname/1,
          peername/1,
-         is_alive/1
+         is_alive/1,
+         controlling_process/2
         ]).
 
 %% internal API
@@ -567,6 +568,17 @@ Return true is the connection process is alive
 is_alive(Server) ->
     is_process_alive(Server).
 
+-doc """
+Change the controlling process (owner) of a socket.
+
+Assigns a new controlling process Pid to Conn. The controlling process is the process that
+the connection sends connection events to. If this function is called from any other process
+ than the current controlling process, {error, not_owner} is returned.
+""".
+-spec controlling_process(Conn :: nats:conn(), Pid :: pid()) -> ok | {error, Reason :: atom()}.
+controlling_process(Conn, Pid) ->
+      gen_statem:call(Conn, {controlling_process, self(), Pid}).
+
 %%%===================================================================
 %%% gen_statem callbacks
 %%%===================================================================
@@ -746,6 +758,17 @@ handle_event(EventType, {with_ctx, Ctx, SpanCtx, Msg}, State, Data) ->
     after
         _ = otel_span:end_span(SpanCtx),
         otel_ctx:detach(Token)
+    end;
+
+handle_event({call, From}, {controlling_process, OldParent, NewParent},
+             _State, #{parent := Parent} = Data) ->
+    case Parent =:= OldParent of
+        true ->
+            unlink(OldParent),
+            link(NewParent),
+            {keep_state, Data#{parent := NewParent}, [{reply, From, ok}]};
+        false ->
+            {keep_state, Data#{parent := NewParent}, [{reply, From, {error, not_owner}}]}
     end;
 
 handle_event({call, _From}, _, State, _Data)

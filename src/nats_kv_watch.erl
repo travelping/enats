@@ -47,8 +47,7 @@
 
 -define(SERVER, ?MODULE).
 
--record(data, {owner, subj_pre, conn, watch, sid, cb, cb_state, init_cnt,
-               ignore_deletes}).
+-record(data, {owner, subj_pre, conn, watch, sid, cb, cb_state, ignore_deletes}).
 
 -define(VALID_KEYS(Keys), (is_binary(Keys) orelse (is_list(Keys) andalso length(Keys) > 0))).
 
@@ -139,8 +138,7 @@ init([Conn, Bucket, Keys, #{owner := Owner} = WatchOpts, Opts]) ->
                watch = Watch,
                sid = Sid,
                cb = Cb,
-               ignore_deletes = maps:get(ignore_deletes, WatchOpts, false),
-               init_cnt = InitCnt
+               ignore_deletes = maps:get(ignore_deletes, WatchOpts, false)
               },
 
     case Cb({init, Owner}, Conn, InitCnt) of
@@ -205,28 +203,26 @@ handle_message({msg, _, <<>>, #{status := 100, header := _Header} = Opts} = _Msg
     ?LOG(error, "unexpected control Message: ~0p", [_Msg]),
     keep_state_and_data;
 
-handle_message({msg, _, _, MsgOpts} = Msg,
+handle_message({msg, _, _, #{reply_to := <<"$JS.ACK.", _/binary>> = ReplyTo} = MsgOpts} = Msg,
                State,
-               #data{conn = Conn, cb = Cb, cb_state = CbStateIn, init_cnt = InitCnt} = Data) ->
+               #data{conn = Conn, cb = Cb, cb_state = CbStateIn} = Data0) ->
+    {ok, #{num_pending := Pending}} = nats_msg:js_metadata(ReplyTo),
     Headers = maps:get(header, MsgOpts, []),
     KvOp = proplists:get_value(?KV_OP, Headers, none),
 
     Next =
-        if Data#data.ignore_deletes andalso (KvOp =:= ?KV_DEL orelse KvOp =:= ?KV_PURGE) ->
+        if Data0#data.ignore_deletes andalso (KvOp =:= ?KV_DEL orelse KvOp =:= ?KV_PURGE) ->
                 {continue, CbStateIn};
            true ->
                 Cb(Msg, Conn, CbStateIn)
         end,
     case Next of
         {continue, CbStateOut} ->
-            case {State, InitCnt} of
-                {init, Cnt} when Cnt > 1 ->
-                    {keep_state, Data#data{cb_state = CbStateOut, init_cnt = Cnt - 1}};
-                {init, 1} ->
-                    {next_state, watching, Data#data{cb_state = CbStateOut,
-                                                     init_cnt = undefined}};
-                {watching, _} ->
-                    {keep_state, Data#data{cb_state = CbStateOut}}
+            Data = Data0#data{cb_state = CbStateOut},
+            case State of
+                init when Pending > 0   -> {keep_state, Data};
+                init when Pending =:= 0 -> {next_state, watching, Data};
+                watching                -> {keep_state, Data}
             end;
         {stop, Reason} ->
             {stop, Reason}

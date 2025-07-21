@@ -37,10 +37,21 @@ suite() ->
     [{timetrap, {minutes,1}}].
 
 all() ->
-    [jetstream, kv].
+    [jetstream, kv, watch].
 
 init_per_suite(Config) ->
+    LogFmt =
+        {logger_formatter, #{single_line => false,
+                             legacy_header => false,
+                             template =>
+                                 ["when=", time, " level=", level,
+                                  {pid, [" pid=", pid], ""},
+                                  " at=", mfa, ":", line,
+                                  " msg=\"", msg, "\"\n"]
+                            }},
     _ = logger:set_primary_config(level, debug),
+    _ = logger:set_handler_config(default, formatter, LogFmt),
+    _ = logger:set_handler_config(cth_log_redirect, formatter, LogFmt),
     application:ensure_started(enats),
     Config.
 
@@ -271,13 +282,74 @@ kv(_Client, Con, _Config) ->
     ok.
 
 
+watch(Config) ->
+    Client = connect(),
+    Cons = lists:map(fun(_) -> connect() end, lists:seq(1, 5)),
+    ct:pal("Cons: ~p", [Cons]),
+
+    try
+        watch(Client, Cons, Config)
+    after
+        lists:foreach(fun(Con) -> nats:disconnect(Con) end, Cons),
+        nats:disconnect(Client)
+    end,
+    ok.
+
+watch(Client, [Con|ConsTail] = _Cons, _Config) ->
+    BucketCreateR1 = nats_kv:create_bucket(Con, ?KV_BUCKET),
+    ct:pal("R1: ~p", [BucketCreateR1]),
+    ?assertMatch({ok, #{config := _}}, BucketCreateR1),
+    %% {ok, #{config := _BucketCfg}} = BucketCreateR1,
+
+    WatchOpts = #{ignore_deletes => true, sharable => true},
+    {ok, Watch} = nats_kv:watch(Con, ?KV_BUCKET, ~">", WatchOpts, #{}),
+
+    receive
+        {init_done, Watch, _} -> ok
+    after 1000 ->
+            throw(did_not_receive_a_msg)
+    end,
+
+    lists:foreach(
+      fun(ConX) ->
+              ok = nats_kv_watch:attach(Watch, ConX),
+              ct:pal("Attached: ~p", [ConX])
+      end, ConsTail),
+
+    lists:foreach(
+      fun(Pos) ->
+              ct:pal("Create ~p", [Pos]),
+              {ok, _} = nats_kv:create(Client, ?KV_BUCKET, integer_to_binary(Pos), ~"FOO"),
+              ct:pal("Wating For Watch On ~p", [Pos]),
+              receive
+                  {'WATCH', Watch, _, Msg} ->
+                      ct:pal("Msg: ~p", [Msg]);
+                  Other ->
+                      ct:pal("unexpected Msg: ~p", [Other])
+              after 1000 ->
+                      throw(did_not_receive_a_msg)
+              end
+      end, lists:seq(1, 10)),
+    ok.
+
+
 %%%===================================================================
 %%% Internal helpers
 %%%===================================================================
 
 nats_addr() ->
-    Host = ct:get_config(nats_host, ~"localhost"),
-    {ok, Host, 4222}.
+    case os:getenv("NATS_URL") of
+        false ->
+            Host = ct:get_config(nats_host, ~"localhost"),
+            {ok, Host, 4222};
+        Value ->
+            case uri_string:parse(Value) of
+                #{host := Host, port := Port} ->
+                    {ok, iolist_to_binary(Host), Port};
+                #{host := Host} ->
+                    {ok, iolist_to_binary(Host), 4222}
+            end
+    end.
 
 connect() ->
     {ok, Host, Port} = nats_addr(),

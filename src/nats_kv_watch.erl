@@ -35,7 +35,7 @@
 -behaviour(gen_statem).
 
 %% API
--export([start/6, stop/1, done/1]).
+-export([start/6, stop/1, done/1, attach/2]).
 
 %% gen_statem callbacks
 -export([callback_mode/0, init/1, terminate/3, code_change/4]).
@@ -47,7 +47,7 @@
 
 -define(SERVER, ?MODULE).
 
--record(data, {owner, subj_pre, conn, watch, sid, cb, cb_state, ignore_deletes}).
+-record(data, {owner, subj_pre, cs, watch, cb, cb_state, ignore_deletes}).
 
 -define(VALID_KEYS(Keys), (is_binary(Keys) orelse (is_list(Keys) andalso length(Keys) > 0))).
 
@@ -70,6 +70,9 @@ done(Pid) ->
     receive {'EXIT', Pid, _} -> true
     after 0 -> true
     end.
+
+attach(Watch, Conn) ->
+    gen_statem:call(Watch, {attach, Conn}).
 
 %%%===================================================================
 %%% gen_statem callbacks
@@ -109,7 +112,6 @@ init([Conn, Bucket, Keys, #{owner := Owner} = WatchOpts, Opts]) ->
     %% {ok, Sid} = nats:sub(Conn, SubSubject),
 
     DeliverSubject =  <<"_INBOX.", (nats:rnd_topic_id())/binary>>,
-    {ok, Sid} = nats:sub(Conn, DeliverSubject),
     WatchConfig0 =
         #{deliver_policy => last_per_subject,
           ack_policy => none,
@@ -123,20 +125,29 @@ init([Conn, Bucket, Keys, #{owner := Owner} = WatchOpts, Opts]) ->
           num_replicas => 1,
           mem_storage => true
          },
-    WatchConfig = filter_subjects(Bucket, Keys, WatchConfig0),
+    WatchConfig1 =
+        case WatchOpts of
+            #{sharable := true} ->
+                WatchConfig0#{deliver_group => make_deliver_group()};
+            _ ->
+                WatchConfig0
+        end,
+    WatchConfig = filter_subjects(Bucket, Keys, WatchConfig1),
+    WatchCreate = #{config => WatchConfig},
+
+    {ok, Sid} = sub(Conn, WatchCreate),
 
     ?LOG(debug, "Sid: ~p~nSubj: ~p~nWatchConfig: ~p~n", [Sid, DeliverSubject, WatchConfig]),
     {ok, Watch} =
-        nats_consumer:create(Conn, ?BUCKET_NAME(Bucket), #{config => WatchConfig}, Opts),
+        nats_consumer:create(Conn, ?BUCKET_NAME(Bucket), WatchCreate, Opts),
 
     Cb = maps:get(cb, WatchOpts, fun default_cb/3),
     InitCnt = maps:get(num_pending, Watch, 0),
     Data0 = #data{
                owner = Owner,
                subj_pre = iolist_to_binary(?SUBJECT_NAME(Bucket, <<>>)),
-               conn = Conn,
+               cs = #{Conn => Sid},
                watch = Watch,
-               sid = Sid,
                cb = Cb,
                ignore_deletes = maps:get(ignore_deletes, WatchOpts, false)
               },
@@ -152,9 +163,8 @@ init([Conn, Bucket, Keys, #{owner := Owner} = WatchOpts, Opts]) ->
             {stop, Reason}
     end.
 
-handle_event(enter, _, watching, #data{conn = Conn,
-                                       cb = Cb, cb_state = CbStateIn} = Data) ->
-    case Cb(init_done, Conn, CbStateIn) of
+handle_event(enter, _, watching, #data{cb = Cb, cb_state = CbStateIn} = Data) ->
+    case Cb(init_done, undefined, CbStateIn) of
         {continue, CbStateOut} ->
             {keep_state, Data#data{cb_state = CbStateOut}};
         {stop, Reason} ->
@@ -164,48 +174,65 @@ handle_event(enter, _, watching, #data{conn = Conn,
 handle_event(enter, _, _, _Data) ->
     keep_state_and_data;
 
-handle_event(info, {Conn, Sid, Msg0}, State, #data{conn = Conn, sid = Sid} = Data) ->
-    Msg = parse_msg(Msg0, Data),
-    handle_message(Msg, State, Data).
+handle_event({call, From}, {attach, Conn}, _State, #data{cs = Cs})
+  when is_map_key(Conn, Cs) ->
+    {keep_state_and_data, [{reply, From, {error, already_attached}}]};
+handle_event({call, From}, {attach, Conn}, _State,
+             #data{cs = Cs, watch = Watch} = Data) ->
+    {ok, Sid} = sub(Conn, Watch),
+    {keep_state, Data#data{cs = Cs#{Conn => Sid}},  [{reply, From, ok}]};
 
-terminate(_Reason, _State,
-          #data{conn = Conn,
-                watch = #{config := #{deliver_subject := DeliverSubject}} = Watch}) ->
-    _ = nats:unsub(Conn, DeliverSubject),
-    _ = nats_consumer:delete(Conn, Watch),
+handle_event(info, {'EXIT', Owner, _Reason}, _State, #data{owner = Owner}) ->
+    {stop, normal};
+
+handle_event(info, {Conn, Sid, Msg0}, State, #data{cs = Cs} = Data) ->
+    case Cs of
+        #{Conn := Sid} ->
+            Msg = parse_msg(Msg0, Data),
+            handle_message(Conn, Msg, State, Data);
+        _ ->
+            ?LOG(error, "got watch message of unknown conn/sid (~p/~p) combination", [Conn, Sid]),
+            keep_state_and_data
+    end.
+
+terminate(_Reason, _State, #data{cs = Cs}) ->
+    %% ephermal consumers are automatically deleted when the last subscription is removed
+    maps:foreach(
+      fun(Conn, Sid) -> _ = (catch nats:unsub(Conn, Sid)) end, Cs),
     ok.
 
 code_change(_OldVsn, State, Data, _Extra) ->
     {ok, State, Data}.
 
-handle_message({msg, _, _, #{status := 100, reply_to := ReplyTo}} = _Msg,
-               _State, #data{conn = Conn}) ->
+handle_message(Conn, {msg, _, _, #{status := 100, reply_to := ReplyTo}} = _Msg,
+               _State, _Data) ->
     %% FlowControl Request
     _ = nats:pub(Conn, ReplyTo),
     keep_state_and_data;
-handle_message({msg, _, <<>>,
-                #{status := 100, description := <<"Idle", _/binary>>,
-                  header := _Header} = Opts} = _Msg,
-               _State, #data{conn = _Conn})
+handle_message(_Conn, {msg, _, <<>>,
+                       #{status := 100, description := <<"Idle", _/binary>>,
+                         header := _Header} = Opts} = _Msg,
+               _State, _Data)
   when not is_map_key(reply_to, Opts) ->
     ?LOG(debug, "HeartBeat Message: ~0p", [_Msg]),
     keep_state_and_data;
-handle_message({msg, _, <<>>,
-                #{status := 100, description := <<"Flow", _/binary>>,
-                  header := _Header} = Opts} = _Msg,
-               _State, #data{conn = _Conn})
+handle_message(_Conn, {msg, _, <<>>,
+                       #{status := 100, description := <<"Flow", _/binary>>,
+                         header := _Header} = Opts} = _Msg,
+               _State, _Data)
   when not is_map_key(reply_to, Opts) ->
     ?LOG(debug, "Flow control Message: ~0p", [_Msg]),
     keep_state_and_data;
-handle_message({msg, _, <<>>, #{status := 100, header := _Header} = Opts} = _Msg,
+handle_message(_Conn, {msg, _, <<>>, #{status := 100, header := _Header} = Opts} = _Msg,
                _State, _Data)
   when not is_map_key(reply_to, Opts) ->
     ?LOG(error, "unexpected control Message: ~0p", [_Msg]),
     keep_state_and_data;
 
-handle_message({msg, _, _, #{reply_to := <<"$JS.ACK.", _/binary>> = ReplyTo} = MsgOpts} = Msg,
+handle_message(Conn,
+               {msg, _, _, #{reply_to := <<"$JS.ACK.", _/binary>> = ReplyTo} = MsgOpts} = Msg,
                State,
-               #data{conn = Conn, cb = Cb, cb_state = CbStateIn} = Data0) ->
+               #data{cb = Cb, cb_state = CbStateIn} = Data0) ->
     {ok, #{num_pending := Pending}} = nats_msg:js_metadata(ReplyTo),
     Headers = maps:get(header, MsgOpts, []),
     KvOp = proplists:get_value(?KV_OP, Headers, none),
@@ -231,6 +258,28 @@ handle_message({msg, _, _, #{reply_to := <<"$JS.ACK.", _/binary>> = ReplyTo} = M
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+sub(Conn, #{config := #{deliver_subject := DeliverSubject} = Config}) ->
+    Opts = case Config of
+               #{deliver_group := QueueGroup} ->
+                   #{queue_group => QueueGroup};
+               _ ->
+                   #{}
+           end,
+    nats:sub(Conn, DeliverSubject, Opts).
+
+make_deliver_pid() ->
+    string:trim(pid_to_list(self()), both, "<>").
+
+make_deliver_group() ->
+    make_deliver_group(erlang:is_alive()).
+
+make_deliver_group(true) ->
+    Node = atom_to_binary(node()),
+    iolist_to_binary([Node, $., make_deliver_pid()]);
+make_deliver_group(false) ->
+    {ok, Host} = inet:gethostname(),
+    iolist_to_binary([Host, $., make_deliver_pid()]).
 
 filter_subjects(Bucket, Key, WatchConfig)
   when is_binary(Key) ->

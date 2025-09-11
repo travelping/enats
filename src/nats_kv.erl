@@ -288,7 +288,17 @@ select_keys(Conn, Bucket, Keys, WatchOpts0, Opts) ->
     WatchOpts = WatchOpts0#{ignore_deletes => true,
                             cb => fun select_keys_watch_cb/3},
     {ok, Pid} = watch(Conn, Bucket, Keys, WatchOpts, Opts),
-    select_keys_loop(Pid, []).
+    RetFun = select_ret_fun(WatchOpts, Opts),
+    select_keys_loop(Pid, RetFun, []).
+
+select_ret_fun(#{headers_only := false}, #{return_meta := true}) ->
+    fun(Key, Data, Opts) -> {Key, Data, Opts} end;
+select_ret_fun(_, #{return_meta := true}) ->
+    fun(Key, _Data, Opts) -> {Key, Opts} end;
+select_ret_fun(#{headers_only := false}, _) ->
+    fun(Key, Data, _Opts) -> {Key, Data} end;
+select_ret_fun(_, _) ->
+    fun(Key, _Data, _Opts) -> Key end.
 
 select_keys_watch_cb({init, Owner}, _Conn, _) ->
     {continue, Owner};
@@ -299,15 +309,13 @@ select_keys_watch_cb({msg, _, _, _} = Msg, _Conn, Owner) ->
     Owner ! {'WATCH', self(), Msg},
     {continue, Owner}.
 
-select_keys_loop(Pid, Acc) ->
+select_keys_loop(Pid, RetFun, Acc) ->
     receive
         {done, Pid} ->
             nats_kv_watch:done(Pid),
             {ok, lists:reverse(Acc)};
-        {'WATCH', Pid, {msg, Key, <<>>, _Opts}} ->
-            select_keys_loop(Pid, [Key | Acc]);
-        {'WATCH', Pid, {msg, Key, Value, _Opts}} ->
-            select_keys_loop(Pid, [{Key, Value} | Acc])
+        {'WATCH', Pid, {msg, Key, Data, Opts}} ->
+            select_keys_loop(Pid, RetFun, [RetFun(Key, Data, Opts) | Acc])
     end.
 
 -doc #{equiv => list_keys(Conn, Bucket, WatchOpts, #{})}.

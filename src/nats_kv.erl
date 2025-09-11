@@ -730,10 +730,10 @@ prepare_key_value_config(#{bucket := Bucket} = Config) ->
           max_bytes             => -1,
           max_age               => maps:get(ttl, Config, 0),
           max_msg_size          => maps:get(max_value_size, Config, -1),
-          replicas              => 1,
+          num_replicas          => 1,
           allow_rollup_hdrs     => true,
           deny_delete           => true,
-          duplicates            => DuplicateWindow,
+          duplicate_window      => DuplicateWindow,
           max_msgs              => -1,
           max_consumers         => -1,
           allow_direct          => true,
@@ -743,7 +743,7 @@ prepare_key_value_config(#{bucket := Bucket} = Config) ->
          },
     maps:merge(StreamCfg,
                maps:with([description, histroy, max_bytes, storage,
-                          replicas, placement, republish, deny_delete,
+                          num_replicas, placement, republish, deny_delete,
                           allow_msg_ttl, subject_delete_marker_ttl,
                           allow_msg_counter, allow_atomic], Config)).
 %% TBD: mirror and sources configuration

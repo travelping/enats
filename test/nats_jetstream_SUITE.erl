@@ -25,7 +25,7 @@
 -define(SUBJECT, ~"CT-SUBJECT").
 -define(STREAM, ~"CT-STREAM").
 -define(PUSH_CONSUMER, ~"CT-PUSH").
--define(PULL_CONSUMER, ~"CT-PUSH").
+-define(PULL_CONSUMER, ~"CT-PULL").
 -define(PUSH_SUBJECT, ~"CT-PUSH-SUBJECT").
 -define(PULL_HANDLER, nats_js_pull_consumer).
 -define(KV_BUCKET, ~"TEST_KV").
@@ -128,7 +128,8 @@ jetstream(Client, Con, _Config) ->
             throw(did_not_receive_a_msg)
     end,
 
-    nats_consumer:delete(Con, Push1Consumer),
+    DelResp1 = nats_consumer:delete(Con, Push1Consumer),
+    ?assertMatch({ok, #{success := true}}, DelResp1),
 
     %%
     %% consumer with ACK all policy
@@ -150,13 +151,14 @@ jetstream(Client, Con, _Config) ->
             throw(did_not_receive_a_msg)
     end,
 
-    nats_consumer:delete(Con, Push2Consumer),
+    DelResp2 = nats_consumer:delete(Con, Push2Consumer),
+    ?assertMatch({ok, #{success := true}}, DelResp2),
 
     %% unsubscribe to push consumer delivery subject
     nats:unsub(Con, PushSid),
 
     %%
-    %% consumer with ACK none policy
+    %% pull consumer with ACK none policy
     %%
     Pull1Config = #{},
     _Pull1Consumer = nats_consumer:create(Con, ?STREAM, ?PULL_CONSUMER, Pull1Config),
@@ -169,8 +171,55 @@ jetstream(Client, Con, _Config) ->
     after 1000 ->
             throw(did_not_receive_a_msg)
     end,
-    nats_pull_consumer:stop(Pull1Srv),
 
+    Msgs = lists:seq(1, 20),
+    lists:foreach(
+      fun(X) -> nats:pub(Client, ?SUBJECT, [~"Hello: #", integer_to_binary(X)]) end,
+      Msgs),
+    lists:foreach(
+      fun(X) ->
+              receive
+                  {?PULL_HANDLER, ?SUBJECT, _, __} ->
+                      ok
+              after 1000 ->
+                      throw({did_not_receive_a_msg, X})
+              end
+      end, Msgs),
+
+    nats_pull_consumer:stop(Pull1Srv),
+    nats_consumer:delete(Con, ?STREAM, ?PULL_CONSUMER),
+
+    %%
+    %% pull consumer with ACK none policy
+    %%
+    Pull2Config = #{config => #{ack_policy => all}},
+    _Pull2Consumer = nats_consumer:create(Con, ?STREAM, ?PULL_CONSUMER, Pull2Config),
+    {ok, Pull2Srv} = nats_pull_consumer:start_link(
+                       ?PULL_HANDLER, Con,
+                       ?STREAM, ?PULL_CONSUMER, #{owner => self()}, []),
+    receive
+        {?PULL_HANDLER, ?SUBJECT, _, _Pull2Msg1Opts} ->
+            ok
+    after 1000 ->
+            throw(did_not_receive_a_msg)
+    end,
+
+    Msgs = lists:seq(1, 20),
+    lists:foreach(
+      fun(X) -> nats:pub(Client, ?SUBJECT, [~"Hello: #", integer_to_binary(X)]) end,
+      Msgs),
+    lists:foreach(
+      fun(X) ->
+              receive
+                  {?PULL_HANDLER, ?SUBJECT, _, __} ->
+                      ok
+              after 1000 ->
+                      throw({did_not_receive_a_msg, X})
+              end
+      end, Msgs),
+
+    nats_pull_consumer:stop(Pull2Srv),
+    nats_consumer:delete(Con, ?STREAM, ?PULL_CONSUMER),
     ok.
 
 kv(Config) ->

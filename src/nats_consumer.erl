@@ -235,13 +235,15 @@ unsubscribe(Conn, Stream, Name, _Opts) ->
     end.
 
 -spec ack_msg(Conn :: nats:conn(), AckType :: atom() | tuple(),
-              Sync :: boolean(), Opts :: map()) -> map().
-ack_msg(_Conn, _AckType, _Sync, #{acked := true} = Opts) ->
+              NextOrSync :: binary() | boolean(), Opts :: map()) -> map().
+ack_msg(_Conn, _AckType, _NextOrSync, #{acked := true} = Opts) ->
     Opts;
-ack_msg(Conn, AckType, Sync, #{reply_to := ReplyTo} = Opts) ->
+ack_msg(Conn, AckType, NextOrSync, #{reply_to := ReplyTo} = Opts) ->
     Ack = ack(AckType),
     %% TBD: swallowing the result of the ACK might be wrong, check with Golang NATS client
-    _ = case Sync of
+    _ = case NextOrSync of
+            _ when is_binary(NextOrSync) ->
+                nats:pub(Conn, ReplyTo, Ack, #{reply_to => NextOrSync});
             true ->
                 nats:request(Conn, ReplyTo, Ack, #{});
             false ->
@@ -254,7 +256,7 @@ ack_msg(Conn, AckType, Sync, #{reply_to := ReplyTo} = Opts) ->
             Opts#{acked => true};
         _ -> Opts
     end;
-ack_msg(_Conn, _AckType, _Sync, Opts) ->
+ack_msg(_Conn, _AckType, _NextOrSync, Opts) ->
     Opts.
 
 %%%===================================================================

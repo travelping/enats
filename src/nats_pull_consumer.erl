@@ -128,22 +128,37 @@ handle_cast(_Request, State) ->
     {noreply, State}.
 
 handle_info({Conn, Sid, {msg, Subject, Message, Opts}},
-            #state{module = Module, modstate = ModStateIn, conn = Conn, sid = Sid} = State) ->
-    ?LOG(debug, "~s: Subject: ~0p, Message: ~0p", [Subject, Message]),
+            #state{module = Module, modstate = ModStateIn, conn = Conn, sid = Sid,
+                   config = #{config := #{ack_policy := AckPolicy}},
+                   stream = Stream, name = Name, inbox = Inbox, nats_opts = NatsOpts,
+                   batch_size = BatchSize, batch_outstanding = BatchOutstanding} = State) ->
+    ?LOG(debug, "Subject: ~0p, Message: ~0p, Outstanding: ~0p",
+         [Subject, Message, State#state.batch_outstanding]),
     {AckType, ModStateOut} = Module:handle_message(Subject, Message, Opts, ModStateIn),
-    _ = nats_consumer:ack_msg(Conn, AckType, false, Opts),
 
-    BatchOutstanding =
-        case State of
-            #state{stream = Stream, name = Name, inbox = Inbox, nats_opts = NatsOpts,
-                   batch_size = BatchSize, batch_outstanding = 1} ->
-                ok = nats_consumer:msg_next(
-                       Conn, Stream, Name, Inbox, #{batch => BatchSize}, NatsOpts),
+    BatchOutstandingNext =
+        case AckType of
+            ack when AckPolicy =/= ~"none", BatchOutstanding =:= 1 ->
+                _ = nats_consumer:ack_msg(Conn, {next, #{batch => BatchSize}}, Inbox, Opts),
                 BatchSize;
-            #state{batch_outstanding = Outstanding} ->
-                Outstanding
+            _ ->
+                case AckPolicy of
+                    ~"none" ->
+                        ok;
+                    _ ->
+                        _ = nats_consumer:ack_msg(Conn, AckType, false, Opts),
+                        ok
+                end,
+                case BatchOutstanding of
+                    1 ->
+                        ok = nats_consumer:msg_next(
+                               Conn, Stream, Name, Inbox, #{batch => BatchSize}, NatsOpts),
+                        BatchSize;
+                    _ ->
+                        BatchOutstanding - 1
+                end
         end,
-    {noreply, State#state{modstate = ModStateOut, batch_outstanding = BatchOutstanding}};
+    {noreply, State#state{modstate = ModStateOut, batch_outstanding = BatchOutstandingNext}};
 
 handle_info(_Info, State) ->
     ?LOG(error, "~s: unexpected info ~0p, state: ~p0", [?MODULE, _Info, State]),

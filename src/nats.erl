@@ -577,7 +577,7 @@ the connection sends connection events to. If this function is called from any o
 """.
 -spec controlling_process(Conn :: nats:conn(), Pid :: pid()) -> ok | {error, Reason :: atom()}.
 controlling_process(Conn, Pid) ->
-      gen_statem:call(Conn, {controlling_process, self(), Pid}).
+    gen_statem:call(Conn, {controlling_process, self(), Pid}).
 
 %%%===================================================================
 %%% gen_statem callbacks

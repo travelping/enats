@@ -25,7 +25,7 @@
 -define(SUBJECT, ~"CT-SUBJECT").
 -define(STREAM, ~"CT-STREAM").
 -define(PUSH_CONSUMER, ~"CT-PUSH").
--define(PULL_CONSUMER, ~"CT-PUSH").
+-define(PULL_CONSUMER, ~"CT-PULL").
 -define(PUSH_SUBJECT, ~"CT-PUSH-SUBJECT").
 -define(PULL_HANDLER, nats_js_pull_consumer).
 -define(KV_BUCKET, ~"TEST_KV").
@@ -37,10 +37,21 @@ suite() ->
     [{timetrap, {minutes,1}}].
 
 all() ->
-    [jetstream, kv].
+    [jetstream, kv, watch].
 
 init_per_suite(Config) ->
+    LogFmt =
+        {logger_formatter, #{single_line => false,
+                             legacy_header => false,
+                             template =>
+                                 ["when=", time, " level=", level,
+                                  {pid, [" pid=", pid], ""},
+                                  " at=", mfa, ":", line,
+                                  " msg=\"", msg, "\"\n"]
+                            }},
     _ = logger:set_primary_config(level, debug),
+    _ = logger:set_handler_config(default, formatter, LogFmt),
+    _ = logger:set_handler_config(cth_log_redirect, formatter, LogFmt),
     application:ensure_started(enats),
     Config.
 
@@ -117,7 +128,8 @@ jetstream(Client, Con, _Config) ->
             throw(did_not_receive_a_msg)
     end,
 
-    nats_consumer:delete(Con, Push1Consumer),
+    DelResp1 = nats_consumer:delete(Con, Push1Consumer),
+    ?assertMatch({ok, #{success := true}}, DelResp1),
 
     %%
     %% consumer with ACK all policy
@@ -139,13 +151,14 @@ jetstream(Client, Con, _Config) ->
             throw(did_not_receive_a_msg)
     end,
 
-    nats_consumer:delete(Con, Push2Consumer),
+    DelResp2 = nats_consumer:delete(Con, Push2Consumer),
+    ?assertMatch({ok, #{success := true}}, DelResp2),
 
     %% unsubscribe to push consumer delivery subject
     nats:unsub(Con, PushSid),
 
     %%
-    %% consumer with ACK none policy
+    %% pull consumer with ACK none policy
     %%
     Pull1Config = #{},
     _Pull1Consumer = nats_consumer:create(Con, ?STREAM, ?PULL_CONSUMER, Pull1Config),
@@ -158,8 +171,55 @@ jetstream(Client, Con, _Config) ->
     after 1000 ->
             throw(did_not_receive_a_msg)
     end,
-    nats_pull_consumer:stop(Pull1Srv),
 
+    Msgs = lists:seq(1, 20),
+    lists:foreach(
+      fun(X) -> nats:pub(Client, ?SUBJECT, [~"Hello: #", integer_to_binary(X)]) end,
+      Msgs),
+    lists:foreach(
+      fun(X) ->
+              receive
+                  {?PULL_HANDLER, ?SUBJECT, _, __} ->
+                      ok
+              after 1000 ->
+                      throw({did_not_receive_a_msg, X})
+              end
+      end, Msgs),
+
+    nats_pull_consumer:stop(Pull1Srv),
+    nats_consumer:delete(Con, ?STREAM, ?PULL_CONSUMER),
+
+    %%
+    %% pull consumer with ACK none policy
+    %%
+    Pull2Config = #{config => #{ack_policy => all}},
+    _Pull2Consumer = nats_consumer:create(Con, ?STREAM, ?PULL_CONSUMER, Pull2Config),
+    {ok, Pull2Srv} = nats_pull_consumer:start_link(
+                       ?PULL_HANDLER, Con,
+                       ?STREAM, ?PULL_CONSUMER, #{owner => self()}, []),
+    receive
+        {?PULL_HANDLER, ?SUBJECT, _, _Pull2Msg1Opts} ->
+            ok
+    after 1000 ->
+            throw(did_not_receive_a_msg)
+    end,
+
+    Msgs = lists:seq(1, 20),
+    lists:foreach(
+      fun(X) -> nats:pub(Client, ?SUBJECT, [~"Hello: #", integer_to_binary(X)]) end,
+      Msgs),
+    lists:foreach(
+      fun(X) ->
+              receive
+                  {?PULL_HANDLER, ?SUBJECT, _, __} ->
+                      ok
+              after 1000 ->
+                      throw({did_not_receive_a_msg, X})
+              end
+      end, Msgs),
+
+    nats_pull_consumer:stop(Pull2Srv),
+    nats_consumer:delete(Con, ?STREAM, ?PULL_CONSUMER),
     ok.
 
 kv(Config) ->
@@ -271,13 +331,74 @@ kv(_Client, Con, _Config) ->
     ok.
 
 
+watch(Config) ->
+    Client = connect(),
+    Cons = lists:map(fun(_) -> connect() end, lists:seq(1, 5)),
+    ct:pal("Cons: ~p", [Cons]),
+
+    try
+        watch(Client, Cons, Config)
+    after
+        lists:foreach(fun(Con) -> nats:disconnect(Con) end, Cons),
+        nats:disconnect(Client)
+    end,
+    ok.
+
+watch(Client, [Con|ConsTail] = _Cons, _Config) ->
+    BucketCreateR1 = nats_kv:create_bucket(Con, ?KV_BUCKET),
+    ct:pal("R1: ~p", [BucketCreateR1]),
+    ?assertMatch({ok, #{config := _}}, BucketCreateR1),
+    %% {ok, #{config := _BucketCfg}} = BucketCreateR1,
+
+    WatchOpts = #{ignore_deletes => true, sharable => true},
+    {ok, Watch} = nats_kv:watch(Con, ?KV_BUCKET, ~">", WatchOpts, #{}),
+
+    receive
+        {init_done, Watch, _} -> ok
+    after 1000 ->
+            throw(did_not_receive_a_msg)
+    end,
+
+    lists:foreach(
+      fun(ConX) ->
+              ok = nats_kv_watch:attach(Watch, ConX),
+              ct:pal("Attached: ~p", [ConX])
+      end, ConsTail),
+
+    lists:foreach(
+      fun(Pos) ->
+              ct:pal("Create ~p", [Pos]),
+              {ok, _} = nats_kv:create(Client, ?KV_BUCKET, integer_to_binary(Pos), ~"FOO"),
+              ct:pal("Wating For Watch On ~p", [Pos]),
+              receive
+                  {'WATCH', Watch, _, Msg} ->
+                      ct:pal("Msg: ~p", [Msg]);
+                  Other ->
+                      ct:pal("unexpected Msg: ~p", [Other])
+              after 1000 ->
+                      throw(did_not_receive_a_msg)
+              end
+      end, lists:seq(1, 10)),
+    ok.
+
+
 %%%===================================================================
 %%% Internal helpers
 %%%===================================================================
 
 nats_addr() ->
-    Host = ct:get_config(nats_host, ~"localhost"),
-    {ok, Host, 4222}.
+    case os:getenv("NATS_URL") of
+        false ->
+            Host = ct:get_config(nats_host, ~"localhost"),
+            {ok, Host, 4222};
+        Value ->
+            case uri_string:parse(Value) of
+                #{host := Host, port := Port} ->
+                    {ok, iolist_to_binary(Host), Port};
+                #{host := Host} ->
+                    {ok, iolist_to_binary(Host), 4222}
+            end
+    end.
 
 connect() ->
     {ok, Host, Port} = nats_addr(),

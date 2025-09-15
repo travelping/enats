@@ -49,7 +49,8 @@
          create/4, create/5,
          update/5,
          delete/3, delete/4,
-         purge/3, purge/4
+         purge/3, purge/4,
+         request/5, pub/5
         ]).
 -ignore_xref([types/1]).
 
@@ -287,7 +288,17 @@ select_keys(Conn, Bucket, Keys, WatchOpts0, Opts) ->
     WatchOpts = WatchOpts0#{ignore_deletes => true,
                             cb => fun select_keys_watch_cb/3},
     {ok, Pid} = watch(Conn, Bucket, Keys, WatchOpts, Opts),
-    select_keys_loop(Pid, []).
+    RetFun = select_ret_fun(WatchOpts, Opts),
+    select_keys_loop(Pid, RetFun, []).
+
+select_ret_fun(#{headers_only := false}, #{return_meta := true}) ->
+    fun(Key, Data, Opts) -> {Key, Data, Opts} end;
+select_ret_fun(_, #{return_meta := true}) ->
+    fun(Key, _Data, Opts) -> {Key, Opts} end;
+select_ret_fun(#{headers_only := false}, _) ->
+    fun(Key, Data, _Opts) -> {Key, Data} end;
+select_ret_fun(_, _) ->
+    fun(Key, _Data, _Opts) -> Key end.
 
 select_keys_watch_cb({init, Owner}, _Conn, _) ->
     {continue, Owner};
@@ -298,15 +309,13 @@ select_keys_watch_cb({msg, _, _, _} = Msg, _Conn, Owner) ->
     Owner ! {'WATCH', self(), Msg},
     {continue, Owner}.
 
-select_keys_loop(Pid, Acc) ->
+select_keys_loop(Pid, RetFun, Acc) ->
     receive
         {done, Pid} ->
             nats_kv_watch:done(Pid),
             {ok, lists:reverse(Acc)};
-        {'WATCH', Pid, {msg, Key, <<>>, _Opts}} ->
-            select_keys_loop(Pid, [Key | Acc]);
-        {'WATCH', Pid, {msg, Key, Value, _Opts}} ->
-            select_keys_loop(Pid, [{Key, Value} | Acc])
+        {'WATCH', Pid, {msg, Key, Data, Opts}} ->
+            select_keys_loop(Pid, RetFun, [RetFun(Key, Data, Opts) | Acc])
     end.
 
 -doc #{equiv => list_keys(Conn, Bucket, WatchOpts, #{})}.
@@ -447,12 +456,7 @@ Returns `{ok, map()}` containing the publish response details or `{error, Reason
 """.
 -spec put(Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata(), Value :: iodata()) -> {ok, map()} | {error, term()}.
 put(Conn, Bucket, Key, Value) ->
-    case nats:request(Conn, ?SUBJECT_NAME(Bucket, Key), Value, #{}) of
-        {ok, Response} ->
-            unmarshal_response(Response);
-        Other ->
-            Other
-    end.
+    request(Conn, Bucket, Key, Value, #{}).
 
 -doc #{equiv => create(Conn, Bucket, Key, Value, #{})}.
 -spec create(Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata(), Value :: iodata()) -> {ok, map()} | {error, term()}.
@@ -508,12 +512,7 @@ Returns `{ok, map()}` containing the publish response details or `{error, Reason
 update(Conn, Bucket, Key, Value, SeqNo) ->
     Header =
         nats_hd:header([{?EXPECTED_LAST_SUBJ_SEQ_HDR, integer_to_binary(SeqNo)}]),
-    case nats:request(Conn, ?SUBJECT_NAME(Bucket, Key), Value, #{header => Header}) of
-        {ok, Response} ->
-            unmarshal_response(Response);
-        {error, _} = Error ->
-            Error
-    end.
+    request(Conn, Bucket, Key, Value, #{header => Header}).
 
 -doc #{equiv => delete(Conn, Bucket, Key, #{})}.
 -spec delete(Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata()) -> {ok, map()} | {error, term()}.
@@ -551,12 +550,7 @@ delete(Conn, Bucket, Key, Opts)
                 Headers0
         end,
     Header = nats_hd:header(Headers),
-    case nats:request(Conn, ?SUBJECT_NAME(Bucket, Key), <<>>, #{header => Header}) of
-        {ok, Response} ->
-            unmarshal_response(Response);
-        {error, _} = Error ->
-            Error
-    end.
+    request(Conn, Bucket, Key, <<>>, #{header => Header}).
 
 -doc """
 Purges a key by placing a delete marker and removing all previous revisions.
@@ -582,6 +576,28 @@ Returns `{ok, map()}` or `{error, Reason}`.
 -spec purge(Conn :: nats:conn(), Bucket :: iodata(), Key :: iodata(), Opts :: map()) -> {ok, map()} | {error, term()}.
 purge(Conn, Bucket, Key, Opts) ->
     delete(Conn, Bucket, Key, Opts#{purge => true}).
+
+-doc """
+Perform a NATS request on Bucket/Key with a given Value and raw NATS request opts.
+
+Returns `{ok, map()}` containing the publish response details for the purge marker
+or `{error, Reason}` on failure.
+""".
+request(Conn, Bucket, Key, Value, Opts) ->
+    case nats:request(Conn, ?SUBJECT_NAME(Bucket, Key), Value, Opts) of
+        {ok, Response} ->
+            unmarshal_response(Response);
+        {error, _} = Error ->
+            Error
+    end.
+
+-doc """
+Perform a NATS publish on Bucket/Key with a given Value and raw NATS request opts.
+
+Returns `ok` or `{error, Reason}` on failure.
+""".
+pub(Conn, Bucket, Key, Value, Opts) ->
+    nats:pub(Conn, ?SUBJECT_NAME(Bucket, Key), Value, Opts).
 
 %%%===================================================================
 %%% Internal functions
@@ -714,10 +730,10 @@ prepare_key_value_config(#{bucket := Bucket} = Config) ->
           max_bytes             => -1,
           max_age               => maps:get(ttl, Config, 0),
           max_msg_size          => maps:get(max_value_size, Config, -1),
-          replicas              => 1,
+          num_replicas          => 1,
           allow_rollup_hdrs     => true,
           deny_delete           => true,
-          duplicates            => DuplicateWindow,
+          duplicate_window      => DuplicateWindow,
           max_msgs              => -1,
           max_consumers         => -1,
           allow_direct          => true,
@@ -727,6 +743,7 @@ prepare_key_value_config(#{bucket := Bucket} = Config) ->
          },
     maps:merge(StreamCfg,
                maps:with([description, histroy, max_bytes, storage,
-                          replicas, placement, republish, deny_delete,
-                          allow_msg_ttl, subject_delete_marker_ttl], Config)).
+                          num_replicas, placement, republish, deny_delete,
+                          allow_msg_ttl, subject_delete_marker_ttl,
+                          allow_msg_counter, allow_atomic], Config)).
 %% TBD: mirror and sources configuration

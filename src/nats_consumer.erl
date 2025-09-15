@@ -44,6 +44,7 @@
 -include_lib("enats/include/nats_stream.hrl").
 
 -define(API_OPTS, [domain, header]).
+-define(CREATE_PROPS, [config, action, pedantic]).
 
 %%%===================================================================
 %%% API
@@ -69,7 +70,7 @@ create(Conn, Stream) ->
           {ok, map()} | {error, any()}.
 create(Conn, Stream, Opts)
   when is_map(Opts) ->
-    create(Conn, Stream, maps:without(?API_OPTS, Opts), maps:with(?API_OPTS, Opts));
+    create(Conn, Stream, maps:with(?CREATE_PROPS, Opts), maps:with(?API_OPTS, Opts));
 
 create(Conn, Stream, Name) ->
     create(Conn, Stream, Name, #{}).
@@ -84,15 +85,17 @@ create(Conn, Stream, Config, Opts)
 
 create(Conn, Stream, Name, Opts)
   when is_map(Opts) ->
-    create(Conn, Stream, Name, maps:without(?API_OPTS, Opts), maps:with(?API_OPTS, Opts)).
+    create(Conn, Stream, Name, maps:with(?CREATE_PROPS, Opts), maps:with(?API_OPTS, Opts)).
 
 -spec create(Conn :: nats:conn(), Stream :: iodata(), Name :: iodata(),
              Config :: map(), Opts :: map()) -> {ok, map()} | {error, any()}.
-create(Conn, Stream, Name, Config, Opts)
-  when is_map(Config), is_map(Opts) ->
+create(Conn, Stream, Name, Config0, Opts)
+  when is_map(Config0), is_map(Opts) ->
     ConsumerId = [Stream, $., Name],
+    NameBin = to_bin(Name),
+    Config = maps:update_with(config, fun(C) -> C#{name => NameBin} end, #{name => NameBin}, Config0),
     create_req(
-      Conn, ConsumerId, Config#{stream_name => to_bin(Stream), name => to_bin(Name)}, Opts).
+      Conn, ConsumerId, Config#{stream_name => to_bin(Stream)}, Opts).
 
 create_req(Conn, ConsumerId, Config, Opts) ->
     Topic = make_js_api_create_topic(ConsumerId, Opts),
@@ -232,13 +235,15 @@ unsubscribe(Conn, Stream, Name, _Opts) ->
     end.
 
 -spec ack_msg(Conn :: nats:conn(), AckType :: atom() | tuple(),
-              Sync :: boolean(), Opts :: map()) -> map().
-ack_msg(_Conn, _AckType, _Sync, #{acked := true} = Opts) ->
+              NextOrSync :: binary() | boolean(), Opts :: map()) -> map().
+ack_msg(_Conn, _AckType, _NextOrSync, #{acked := true} = Opts) ->
     Opts;
-ack_msg(Conn, AckType, Sync, #{reply_to := ReplyTo} = Opts) ->
+ack_msg(Conn, AckType, NextOrSync, #{reply_to := ReplyTo} = Opts) ->
     Ack = ack(AckType),
     %% TBD: swallowing the result of the ACK might be wrong, check with Golang NATS client
-    _ = case Sync of
+    _ = case NextOrSync of
+            _ when is_binary(NextOrSync) ->
+                nats:pub(Conn, ReplyTo, Ack, #{reply_to => NextOrSync});
             true ->
                 nats:request(Conn, ReplyTo, Ack, #{});
             false ->
@@ -251,7 +256,7 @@ ack_msg(Conn, AckType, Sync, #{reply_to := ReplyTo} = Opts) ->
             Opts#{acked => true};
         _ -> Opts
     end;
-ack_msg(_Conn, _AckType, _Sync, Opts) ->
+ack_msg(_Conn, _AckType, _NextOrSync, Opts) ->
     Opts.
 
 %%%===================================================================
